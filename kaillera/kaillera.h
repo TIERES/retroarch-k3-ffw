@@ -41,6 +41,15 @@ void kailleraChatSendExternal(const char* messge);
 void cp1251_to_utf8(char* out, const char* in);
 extern bool kailleraNetplay;
 extern bool kailleraInitialised;
+// True whenever the active Kaillera session is n02's Playback mode (static
+// .krec file, "Replays Online", or Watch Live) rather than P2P/Server. Unlike
+// those two, Playback has no live peer to stay in lockstep with, so hotkeys
+// normally disabled while any Kaillera session is active (see kailleraInitialised
+// checks) can safely be allowed. Only meaningful once a game has actually
+// started (set from kailleraGameCallback() via the optional
+// kailleraIsPlaybackMode() DLL export - absent on older/other Kaillera DLLs,
+// which always leave this false).
+extern bool kailleraPlaybackMode;
 extern volatile int kailleraInitialisedInternal;
 extern int kNumPlayers;
 extern int kPlayerNumber;

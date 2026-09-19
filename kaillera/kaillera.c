@@ -25,6 +25,7 @@ static pthread_t threadk;
  
 bool kailleraInitialised;
 bool kailleraNetplay;
+bool kailleraPlaybackMode;
 int kNumPlayers;
 int kPlayerNumber;
 #ifdef KAILLERA_DEFAULT
@@ -59,6 +60,12 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
 
    if (kNumPlayers > MAX_INPUTS)
       kNumPlayers = MAX_INPUTS;
+
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   /* kailleraIsPlaybackModeF is only ever non-NULL here (see LoadKaillera()
+      below) - the Open Kaillera n02 path above has no such export. */
+   kailleraPlaybackMode = (kailleraIsPlaybackModeF != NULL) && (kailleraIsPlaybackModeF() != 0);
+#endif
 
    settings->bools.preemptive_frames_enable = false;
    settings->bools.menu_pause_libretro = false;
@@ -306,6 +313,10 @@ int (WINAPI* kailleraChatSendF)(char* text);
 int (WINAPI* kailleraInitF)();
 int (WINAPI* kailleraShutdownF)();
 int (WINAPI* kailleraEndGameF)();
+/* Optional - not part of the standard Kaillera client API, so only real/newer
+   n02 kailleraclient.dll builds export it. Left NULL (and kailleraPlaybackMode
+   left false) for any DLL that doesn't. */
+int (WINAPI* kailleraIsPlaybackModeF)();
 
 
 
@@ -313,6 +324,7 @@ void CloseKaillera() {
    if (kailleraInitialised) {
       kailleraShutdownF(); //in n02 this callback do nothing
       kailleraInitialised = false;
+      kailleraPlaybackMode = false;
       CloseHandle(KailleraHandle);
    }
    if (kailleraDLL)
@@ -363,6 +375,7 @@ void LoadKaillera() {
       kailleraModifyPlayValuesF = (int (WINAPI*)(void* values, int size)) GetProcAddress(kailleraDLL, "kailleraModifyPlayValues");
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "kailleraChatSend");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraEndGame");
+      kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraIsPlaybackMode");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -372,6 +385,7 @@ void LoadKaillera() {
       kailleraModifyPlayValuesF = (int (WINAPI*)(void* values, int size)) GetProcAddress(kailleraDLL, "_kailleraModifyPlayValues@8");
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "_kailleraChatSend@4");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraEndGame@0");
+      kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraIsPlaybackMode@0");
 #endif
 
       if (kailleraGetVersionF != NULL &&
@@ -421,6 +435,7 @@ void EndKailleraGame() {
    if (kailleraInitialisedInternal) {
       kailleraWaitSaveLoad = 0;
       kailleraNetplay = false;
+      kailleraPlaybackMode = false;
       kailleraInitialisedInternal = 0;
       stop_execute_shit = 0;
 #if defined(N02_WIN32) || defined(N02_LINUX)

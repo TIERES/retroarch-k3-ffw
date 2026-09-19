@@ -6390,7 +6390,7 @@ static enum runloop_state_enum runloop_check_state(
 #endif
 #endif
 
-   if (!kailleraInitialised) {
+   if (!kailleraInitialised || kailleraPlaybackMode) {
       if (!focused && !runloop_paused)
       {
          cbs->poll_cb();
