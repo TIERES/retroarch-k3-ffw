@@ -4996,7 +4996,7 @@ static void input_keys_pressed(
    if (!binds)
       return;
 
-   if (!kailleraNetplay)
+   if (!kailleraNetplay || kailleraPlaybackMode)
    if (     binds[port][RARCH_ENABLE_HOTKEY].valid
          && CHECK_INPUT_DRIVER_BLOCK_HOTKEY(binds_norm, binds_auto))
    {

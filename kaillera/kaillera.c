@@ -45,6 +45,9 @@ char filePathK[MAX_GAMES][512];
 char corePaths[MAX_GAMES][512];
 char* kailleraGames;
 
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+extern int (WINAPI* kailleraIsPlaybackModeF)();
+#endif
 
 
 #if defined(N02_WIN32) || defined(N02_LINUX)
