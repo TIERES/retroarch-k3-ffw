@@ -9,15 +9,17 @@ endif
 
 include config.mk
 
+OUTDIR ?= .
+
 # Put your favorite compile flags in this file, if you want different defaults than upstream.
 # Do not attempt to create that file upstream.
 # (It'd be better to put this comment in that file, but .gitignore doesn't work on files that exist in the repo.)
 -include Makefile.local
 
 ifeq ($(HAVE_ANGLE), 1)
-TARGET = retroarch_angle
+TARGET = $(OUTDIR)/retroarch_angle
 else
-TARGET = retroarch
+TARGET = $(OUTDIR)/retroarch
 endif
 
 OBJ :=
@@ -30,7 +32,7 @@ DEFINES += -DASSETS_DIR='"$(DESTDIR)$(ASSETS_DIR)"'
 DEFINES += -DFILTERS_DIR='"$(DESTDIR)$(FILTERS_DIR)"'
 DEFINES += -DCORE_INFO_DIR='"$(DESTDIR)$(CORE_INFO_DIR)"'
 
-OBJDIR_BASE := obj-unix
+OBJDIR_BASE := $(OUTDIR)/obj-unix
 
 ifeq ($(NEED_GOLD_LINKER), 1)
    LDFLAGS += -fuse-ld=gold
@@ -200,6 +202,7 @@ endif
 SYMBOL_MAP := -Wl,-Map=output.map
 
 $(TARGET): $(RARCH_OBJ)
+	@mkdir -p $(dir $@)
 	@$(if $(Q), $(shell echo echo LD $@),)
 	$(Q)$(LINK) -o $@ $(RARCH_OBJ) $(LIBS) $(LDFLAGS) $(LIBRARY_DIRS)
 
@@ -286,7 +289,7 @@ uninstall:
 
 clean:
 	rm -rf $(OBJDIR_BASE)
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TARGET).exe
 	rm -f *.d
 
 .PHONY: all install uninstall clean
