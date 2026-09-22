@@ -321,6 +321,12 @@ int (WINAPI* kailleraEndGameF)();
    left false) for any DLL that doesn't. */
 int (WINAPI* kailleraIsPlaybackModeF)();
 
+/* retry-connect - optional, same GetProcAddress-if-present convention as
+   kailleraIsPlaybackModeF above. See kaillera.h. */
+int (WINAPI* kailleraRetryConnectCanControlF)();
+void (WINAPI* kailleraRetryConnectNotifyLocalControlF)(int action, int frame_index);
+int (WINAPI* kailleraRetryConnectPollF)(int* outAction, int* outFrameIndex);
+
 
 
 void CloseKaillera() {
@@ -379,6 +385,9 @@ void LoadKaillera() {
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "kailleraChatSend");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraEndGame");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraIsPlaybackMode");
+      kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
+      kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
+      kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -389,6 +398,9 @@ void LoadKaillera() {
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "_kailleraChatSend@4");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraEndGame@0");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraIsPlaybackMode@0");
+      kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
+      kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
+      kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");
 #endif
 
       if (kailleraGetVersionF != NULL &&
@@ -420,6 +432,80 @@ int kailleraSyncData(void* value, const int len) {
    return client.gameplay.syncData(value, len);
 #else
    return kailleraModifyPlayValuesF(value, len);
+#endif
+}
+
+/* retry-connect targets the classic kailleraclient.dll API only for now (see
+   kaillera-client's kcore/kaillera_retryconnect.h) - no-ops on the n02/Open
+   Kaillera path, which has its own (unused here) extension points. */
+bool kailleraRetryConnectCanControl() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return false;
+#else
+   return (kailleraRetryConnectCanControlF != NULL) && (kailleraRetryConnectCanControlF() != 0);
+#endif
+}
+
+void kailleraRetryConnectNotify(int action) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)action;
+#else
+   if (kailleraRetryConnectNotifyLocalControlF != NULL)
+      kailleraRetryConnectNotifyLocalControlF(action, (int)current_core_frame);
+#endif
+}
+
+void kailleraRetryConnectRefreshPlaybackMode() {
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   kailleraPlaybackMode = (kailleraIsPlaybackModeF != NULL) && (kailleraIsPlaybackModeF() != 0);
+#endif
+}
+
+void kailleraRetryConnectPauseTick() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   static bool old_enter_pressed = false;
+   bool enter_pressed;
+   int action;
+   int frame_index;
+
+   if (kailleraRetryConnectPollF == NULL)
+      return;
+
+   /* Enter (go live) - host only, only while actually paused (this function
+      only runs from RUNLOOP_STATE_PAUSE, so we know we are). No native
+      RetroArch hotkey exists for this, so it's a direct key check here
+      rather than going through the input-remapping/hotkey system. */
+   if (kailleraRetryConnectCanControl()) {
+      enter_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000) ? true : false;
+      if (enter_pressed && !old_enter_pressed) {
+         command_event(CMD_EVENT_UNPAUSE, NULL);
+         kailleraRetryConnectNotify(RC_ACTION_GO_LIVE);
+         kailleraRetryConnectRefreshPlaybackMode();
+      }
+      old_enter_pressed = enter_pressed;
+   }
+
+   /* Remote RESUME/GO_LIVE arriving while we're already paused - the normal
+      per-frame drain (kaillera_retryconnect_pump(), called from
+      kailleraModifyPlayValuesF()) does not run at all while paused, so this
+      is the only place a paused client ever sees these. */
+   action = 0;
+   frame_index = 0;
+   while (kailleraRetryConnectPollF(&action, &frame_index)) {
+      switch (action) {
+      case RC_ACTION_RESUME:
+         command_event(CMD_EVENT_UNPAUSE, NULL);
+         break;
+      case RC_ACTION_GO_LIVE:
+         command_event(CMD_EVENT_UNPAUSE, NULL);
+         kailleraRetryConnectRefreshPlaybackMode();
+         break;
+      default:
+         break;
+      }
+   }
 #endif
 }
 

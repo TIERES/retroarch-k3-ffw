@@ -6333,6 +6333,35 @@ static enum runloop_state_enum runloop_check_state(
             runloop_paused = false;
       }
    }
+   else if (kailleraRetryConnectCanControl())
+   {
+      /* retry-connect: host-only native Pause/Resume during a group replay,
+         reusing whatever key the user already has RARCH_PAUSE_TOGGLE bound to
+         (usually P) so muscle memory still works - see kaillera.h. Calls
+         CMD_EVENT_PAUSE/CMD_EVENT_UNPAUSE directly instead of
+         CMD_EVENT_PAUSE_TOGGLE, since that command's handler still
+         unconditionally blocks during any Kaillera session (retroarch.c) and
+         this avoids touching that gate at all. Enter (go live, only once
+         paused) is handled separately, from RUNLOOP_STATE_PAUSE below -
+         see kailleraRetryConnectPauseTick(). */
+      static bool old_pause_pressed = false;
+      bool pause_pressed = BIT256_GET(current_bits, RARCH_PAUSE_TOGGLE);
+
+      if (pause_pressed && !old_pause_pressed)
+      {
+         if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+         {
+            command_event(CMD_EVENT_UNPAUSE, NULL);
+            kailleraRetryConnectNotify(RC_ACTION_RESUME);
+         }
+         else
+         {
+            command_event(CMD_EVENT_PAUSE, NULL);
+            kailleraRetryConnectNotify(RC_ACTION_PAUSE);
+         }
+      }
+      old_pause_pressed = pause_pressed;
+   }
 
    /* Check recording hotkey */
    HOTKEY_CHECK(RARCH_RECORDING_TOGGLE, CMD_EVENT_RECORDING_TOGGLE, true, NULL);
@@ -7014,6 +7043,13 @@ int runloop_iterate(void)
          /* FIXME: This is an ugly way to tell Netplay this... */
          netplay_driver_ctl(RARCH_NETPLAY_CTL_PAUSE, NULL);
 #endif
+         /* retry-connect: core_run() (and with it kailleraSyncData(), which
+            is where the connection normally gets drained) does not run at
+            all while paused - this is the only remaining place a paused
+            client can hear a remote RESUME/GO_LIVE, or notice the host's
+            local Enter press. See kailleraRetryConnectPauseTick(). */
+         if (kailleraNetplay)
+            kailleraRetryConnectPauseTick();
          video_driver_cached_frame();
          return 1;
       case RUNLOOP_STATE_END:
@@ -7913,6 +7949,13 @@ void core_run(void)
 
       current_core_frame++;
       //RARCH_DBG("CF[%i]\n", current_core_frame);
+
+      /* retry-connect: cheap to re-check every frame, and needed here - a
+         group replay can go live (GO_LIVE) mid-match while we're still
+         mid-catch-up (not yet paused), which the pause-only refresh in
+         kailleraRetryConnectPauseTick() would miss entirely. Harmless/a
+         no-op for every other kailleraNetplay case. */
+      kailleraRetryConnectRefreshPlaybackMode();
 
       if (kailleraCommands) {
 #ifdef KAILLERA_DEFAULT
