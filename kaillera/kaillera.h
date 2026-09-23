@@ -27,6 +27,7 @@
 #define RC_ACTION_RESUME    2
 #define RC_ACTION_GO_LIVE   3
 #define RC_ACTION_REWIND_TO 4 /* reserved - not implemented yet */
+#define RC_ACTION_STATE_READY 5
 
 
 typedef struct {
@@ -72,6 +73,16 @@ extern bool kailleraPlaybackMode;
    Kaillera session (a peer's local presses must not affect anyone). */
 bool kailleraRetryConnectCanControl();
 
+/* True for every client (host or peer) while a retry-connect session is
+   active - unlike kailleraRetryConnectCanControl() above, does not imply
+   "is host". Needed to tell a retry-connect peer apart from someone using
+   n02's ordinary standalone Playback/Watch mode (kailleraPlaybackMode is
+   true in both cases, but only the former has a host to defer to): peers
+   must not be able to fast-forward on their own during a group replay (see
+   the fast-forward hotkey block, runloop.c), while solo playback keeps
+   fast-forwarding freely for whoever's watching. */
+bool kailleraRetryConnectActive();
+
 /* Call when the local user (already confirmed to be the host via
    kailleraRetryConnectCanControl() above) presses native Pause/Resume, or
    Enter to go live - relays it to every other player via the DLL, tagged
@@ -98,6 +109,72 @@ void kailleraRetryConnectRefreshPlaybackMode();
    while genuinely paused - Enter has no effect otherwise) and drains/applies
    any PAUSE/RESUME/GO_LIVE a peer sent while we were paused. */
 void kailleraRetryConnectPauseTick();
+
+/* Call once per core_run() frame (kailleraNetplay only) - the complement to
+   kailleraRetryConnectPauseTick() above for the common case where we're NOT
+   currently paused. Drains and applies any PAUSE/RESUME/GO_LIVE/STATE_READY
+   a peer sent, exactly as kailleraRetryConnectPauseTick() does while paused -
+   needed because fast-forward during a group replay is host-only and purely
+   local (see kailleraRetryConnectUploadState() below), so everyone else just
+   keeps running core_run() normally at their own pace until the host's next
+   signal arrives, and that signal has to be caught from here, not from the
+   paused-only channel. */
+void kailleraRetryConnectFrameTick();
+
+/* True for a short window (both host and peer) right after the go-live
+   countdown ends and control is actually handed back - see
+   RETRYCONNECT_NEUTRAL_INPUT_MS in kaillera.c. While true, the local
+   player's real controller state should still be sampled/polled normally
+   (so hotkeys etc. keep working) but must NOT be sent as this frame's
+   Kaillera input - runloop.c zeroes its own slot of netjoy/netjoy_ex right
+   before kailleraSyncData() ships it, so both sides exchange one guaranteed
+   second of clean neutral frames before real input starts flowing, instead
+   of whatever each player happened to be physically holding at the
+   arbitrary, unsynchronized instant control came back. Always false outside
+   retry-connect (starts false, only ever armed by the go-live countdown
+   above). */
+bool kailleraRetryConnectSuppressLocalInput();
+
+/* Host-only: call right after locally pausing (the pause hotkey block,
+   runloop.c) - takes a core_serialize() snapshot of exactly this frame and
+   hands it to kailleraRetryConnectUploadState() below. Every host Pause
+   sends a fresh one (host may pause/resume/re-pause any number of times
+   while searching for the right moment; the peer just loads whichever one
+   arrived most recently, staying paused - see kaillera.c's
+   ApplyRetryConnectStateReady()). No-op if not host (defense in depth -
+   the caller is expected to have already gated this itself). */
+void kailleraRetryConnectCaptureAndSendState();
+
+/* Host-only: uploads `data`/`size` (a core_serialize() blob, taken the
+   instant fast-forward stops - see the pause hotkey block, runloop.c) to the
+   community server and, on success, notifies every other player
+   (RC_ACTION_STATE_READY) so they load that exact state instead of trying to
+   reach the same frame by replaying frame-by-frame themselves. Fast-forward
+   during a group replay is host-only and purely local for exactly this
+   reason: different machines/cores aren't guaranteed to reach the same frame
+   at the same real-world time, so nobody but the host ever fast-forwards -
+   everyone else jumps via this state hand-off instead. No-op (and no error)
+   if the DLL predates this export or the caller isn't host. */
+void kailleraRetryConnectUploadState(const void* data, int size);
+
+/* Downloads the state kailleraRetryConnectUploadState() above just uploaded,
+   into the caller-owned outBuffer (capacity bufferCap - size it from
+   core_serialize_size(), which must match across every client since they all
+   run the same core/content). Returns the number of bytes written (pass
+   straight to core_unserialize()), or -1 on any failure (network, no state
+   uploaded yet, DLL too old, buffer too small). *outFrameIndex receives the
+   .krec frame index the state was taken at, so the caller can also fast
+   -forward (skip, not simulate) its own local replay position to match. */
+int kailleraRetryConnectDownloadState(void* outBuffer, int bufferCap, int* outFrameIndex);
+
+/* Checkpoint-based rewind for solo "Reproducao de Replay" (static local-file
+   Playback - kailleraPlaybackMode true, but NOT a retry-connect group replay
+   and NOT "Watch Live" streaming, neither of which have a fixed underlying
+   file to rewind within). Call once per frontend tick (both while paused and
+   while running - the Left-arrow rewind key needs to work either way,
+   mirroring retry-connect's own Pause/FrameTick split). No-op (cheap) outside
+   that specific mode. See kaillera.c for the actual checkpoint ring buffer. */
+void kailleraPlaybackRewindTick();
 
 extern volatile int kailleraInitialisedInternal;
 extern int kNumPlayers;

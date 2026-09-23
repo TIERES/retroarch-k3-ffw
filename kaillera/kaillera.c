@@ -21,6 +21,11 @@ static pthread_t threadk;
 #include "../libretro-common/include/queues/message_queue.h"
 #include "command.h"
 #include "version.h"
+#include "core.h"
+#include "runloop.h"
+#include "input/input_driver.h"
+#include "gfx/video_driver.h"
+#include <commctrl.h> /* TOOLTIPS_CLASSA - playback toolbar's button tooltips */
 
  
 bool kailleraInitialised;
@@ -326,6 +331,16 @@ int (WINAPI* kailleraIsPlaybackModeF)();
 int (WINAPI* kailleraRetryConnectCanControlF)();
 void (WINAPI* kailleraRetryConnectNotifyLocalControlF)(int action, int frame_index);
 int (WINAPI* kailleraRetryConnectPollF)(int* outAction, int* outFrameIndex);
+int (WINAPI* kailleraRetryConnectActiveF)();
+void (WINAPI* kailleraRetryConnectUploadStateF)(const void* data, int size);
+int (WINAPI* kailleraRetryConnectDownloadStateF)(void* outBuffer, int bufferCap, int* outFrameIndex);
+
+/* Playback checkpoint rewind - optional, same convention. See kaillera.h's
+   kailleraPlaybackRewindTick(). */
+int (WINAPI* kailleraPlaybackGetFrameIndexF)();
+void (WINAPI* kailleraPlaybackSeekToFrameF)(int frame);
+int (WINAPI* kailleraPlaybackGetTotalFramesF)();
+void (WINAPI* kailleraPlaybackStopF)();
 
 
 
@@ -388,6 +403,13 @@ void LoadKaillera() {
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
+      kailleraRetryConnectActiveF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectActive");
+      kailleraRetryConnectUploadStateF = (void (WINAPI*)(const void*, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectUploadState");
+      kailleraRetryConnectDownloadStateF = (int (WINAPI*)(void*, int, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectDownloadState");
+      kailleraPlaybackGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackGetFrameIndex");
+      kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "kailleraPlaybackSeekToFrame");
+      kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackGetTotalFrames");
+      kailleraPlaybackStopF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackStop");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -401,6 +423,13 @@ void LoadKaillera() {
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");
+      kailleraRetryConnectActiveF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectActive@0");
+      kailleraRetryConnectUploadStateF = (void (WINAPI*)(const void*, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectUploadState@8");
+      kailleraRetryConnectDownloadStateF = (int (WINAPI*)(void*, int, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectDownloadState@12");
+      kailleraPlaybackGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackGetFrameIndex@0");
+      kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "_kailleraPlaybackSeekToFrame@4");
+      kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackGetTotalFrames@0");
+      kailleraPlaybackStopF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackStop@0");
 #endif
 
       if (kailleraGetVersionF != NULL &&
@@ -461,6 +490,977 @@ void kailleraRetryConnectRefreshPlaybackMode() {
 #endif
 }
 
+bool kailleraRetryConnectActive() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return false;
+#else
+   return (kailleraRetryConnectActiveF != NULL) && (kailleraRetryConnectActiveF() != 0);
+#endif
+}
+
+void kailleraRetryConnectUploadState(const void* data, int size) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)data; (void)size;
+#else
+   if (kailleraRetryConnectUploadStateF != NULL)
+      kailleraRetryConnectUploadStateF(data, size);
+#endif
+}
+
+int kailleraRetryConnectDownloadState(void* outBuffer, int bufferCap, int* outFrameIndex) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)outBuffer; (void)bufferCap; (void)outFrameIndex;
+   return -1;
+#else
+   if (kailleraRetryConnectDownloadStateF == NULL)
+      return -1;
+   return kailleraRetryConnectDownloadStateF(outBuffer, bufferCap, outFrameIndex);
+#endif
+}
+
+static int kailleraPlaybackGetFrameIndex(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return -1;
+#else
+   if (kailleraPlaybackGetFrameIndexF == NULL)
+      return -1;
+   return kailleraPlaybackGetFrameIndexF();
+#endif
+}
+
+static void kailleraPlaybackSeekToFrame(int frame) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)frame;
+#else
+   if (kailleraPlaybackSeekToFrameF != NULL)
+      kailleraPlaybackSeekToFrameF(frame);
+#endif
+}
+
+static int kailleraPlaybackGetTotalFrames(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return -1;
+#else
+   if (kailleraPlaybackGetTotalFramesF == NULL)
+      return -1;
+   return kailleraPlaybackGetTotalFramesF();
+#endif
+}
+
+// Same action as the Player dialog's own "Stop" button.
+static void kailleraPlaybackStop(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+#else
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+      command_event(CMD_EVENT_UNPAUSE, NULL); /* unpause first - stopping while paused left things in a bad state */
+   if (kailleraPlaybackStopF != NULL)
+      kailleraPlaybackStopF();
+#endif
+}
+
+/* Checkpoint-based rewind for solo "Reproducao de Replay" (static local-file
+   Playback only - see kaillera.h's kailleraPlaybackRewindTick()). Deliberately
+   NOT RetroArch's own built-in rewind (state_manager_check_rewind(), the
+   RARCH_REWIND hotkey) - that needs an unbroken per-frame delta history kept
+   continuously from the moment rewind is armed, which doesn't fit well with
+   content fed by a kaillera-style pseudo core_run() and would cost memory
+   the whole time playback runs, for a feature only used occasionally. This
+   is coarser but far cheaper: a full core_serialize() snapshot every
+   PLAYBACK_CHECKPOINT_INTERVAL_FRAMES of actual replay content (using the
+   .krec reader's own frame count via kailleraPlaybackGetFrameIndex() above,
+   not wall-clock time, so spacing stays consistent whatever speed the user
+   is fast-forwarding at), keeping the last PLAYBACK_CHECKPOINT_COUNT of them
+   in a ring buffer. Left steps back through them one at a time - each press
+   loads the next-older checkpoint and re-anchors the .krec reader to its
+   exact frame (kailleraPlaybackSeekToFrame()), without touching pause state
+   either way - playback just keeps going (or stays paused, if that's how
+   the user is scrubbing through checkpoints one at a time). */
+#define PLAYBACK_CHECKPOINT_INTERVAL_FRAMES 600 /* ~10s at 60fps */
+#define PLAYBACK_CHECKPOINT_COUNT 10
+/* How long a rewind "gesture" stays open after the last Left press - see
+   kailleraPlaybackRewindTick(). Repeated presses inside this window keep
+   stacking (go back further each time); once it elapses with no further
+   press, playback is treated as having moved on for good, and the next
+   Left press starts counting from zero again instead of stacking onto
+   however many steps were taken before. */
+#define PLAYBACK_REWIND_GESTURE_MS 1000
+
+typedef struct {
+   void  *data;
+   size_t size;
+   int    frame_index;
+} PlaybackCheckpoint;
+
+static PlaybackCheckpoint s_pb_checkpoints[PLAYBACK_CHECKPOINT_COUNT];
+static int s_pb_checkpoint_count = 0;      /* how many ring slots are actually filled (grows to PLAYBACK_CHECKPOINT_COUNT, then stays there) */
+static int s_pb_checkpoint_next = 0;       /* ring write cursor - where the NEXT checkpoint will be written */
+static int s_pb_rewind_steps = 0;          /* 0 = at the live playback edge; N = loaded the checkpoint N steps before it */
+static int s_pb_last_checkpoint_frame = -1; /* frame_index() as of the last checkpoint (or session start) - -1 = no static playback session tracked yet */
+static DWORD s_pb_rewind_gesture_until = 0; /* 0 = no rewind gesture in progress; else the GetTickCount() deadline it expires at */
+static bool s_pb_virtual_rewind_request = false; /* one-shot flag set by the on-screen toolbar's Rewind button - see kailleraPlaybackRewindTick() */
+
+// Called by the on-screen playback toolbar's Rewind button (mouse click) -
+// consumed exactly like a real Left keypress by kailleraPlaybackRewindTick()
+// below, just via a flag instead of GetAsyncKeyState().
+static void kailleraPlaybackRequestRewind(void) {
+   s_pb_virtual_rewind_request = true;
+}
+
+static void PlaybackRewindReset(void) {
+   int i;
+   for (i = 0; i < PLAYBACK_CHECKPOINT_COUNT; i++) {
+      free(s_pb_checkpoints[i].data);
+      s_pb_checkpoints[i].data = NULL;
+      s_pb_checkpoints[i].size = 0;
+   }
+   s_pb_checkpoint_count = 0;
+   s_pb_checkpoint_next = 0;
+   s_pb_rewind_steps = 0;
+   s_pb_last_checkpoint_frame = -1;
+   s_pb_rewind_gesture_until = 0;
+}
+
+// `force` bypasses the normal PLAYBACK_CHECKPOINT_INTERVAL_FRAMES spacing -
+// used once a rewind gesture (see above) has settled, to capture a fresh
+// checkpoint right where playback ended up instead of waiting out however
+// much of the normal ~10s interval happens to be left.
+static void PlaybackRewindMaybeCapture(int frame_index, bool force) {
+   size_t state_size;
+   void *state_buf;
+   retro_ctx_serialize_info_t info;
+   PlaybackCheckpoint *slot;
+
+   if (s_pb_last_checkpoint_frame < 0) {
+      s_pb_last_checkpoint_frame = frame_index; /* first frame seen this session - anchor from here, nothing to capture yet */
+      return;
+   }
+   if (!force && frame_index - s_pb_last_checkpoint_frame < PLAYBACK_CHECKPOINT_INTERVAL_FRAMES)
+      return;
+
+   if (force && s_pb_rewind_steps > 0) {
+      // We're branching forward from a rewound point (s_pb_rewind_steps
+      // checkpoints back from the write cursor) - anything strictly newer
+      // than that point (the s_pb_rewind_steps-1 entries between it and the
+      // write cursor) describes a future that no longer happened once
+      // playback continued differently from here. Drop them and rewind the
+      // write cursor to right after our current spot, so what gets written
+      // below becomes the new "most recent" entry instead of landing
+      // wherever forward-only progress had last reached - otherwise a step
+      // further back can land on something NEWER than a step closer in,
+      // since the ring would still hold that stale, now-invalid future.
+      int discard = s_pb_rewind_steps - 1;
+      s_pb_checkpoint_next = (s_pb_checkpoint_next - discard + PLAYBACK_CHECKPOINT_COUNT * 2) % PLAYBACK_CHECKPOINT_COUNT;
+      s_pb_checkpoint_count -= discard;
+   }
+
+   state_size = core_serialize_size();
+   if (state_size == 0)
+      return;
+   state_buf = malloc(state_size);
+   if (state_buf == NULL)
+      return;
+   info.data       = state_buf;
+   info.data_const = NULL;
+   info.size       = state_size;
+   if (!core_serialize(&info)) {
+      free(state_buf);
+      return;
+   }
+
+   slot = &s_pb_checkpoints[s_pb_checkpoint_next];
+   free(slot->data);
+   slot->data        = state_buf;
+   slot->size        = state_size;
+   slot->frame_index = frame_index;
+
+   s_pb_checkpoint_next = (s_pb_checkpoint_next + 1) % PLAYBACK_CHECKPOINT_COUNT;
+   if (s_pb_checkpoint_count < PLAYBACK_CHECKPOINT_COUNT)
+      s_pb_checkpoint_count++;
+   s_pb_rewind_steps = 0; /* real forward progress happened - any earlier rewind is now old news */
+   s_pb_last_checkpoint_frame = frame_index;
+}
+
+/* On-screen mouse-clickable control toolbar for solo "Reproducao de Replay" -
+   a small always-on-top window (owned by the main RetroArch window, not a
+   true child, so it survives the game window resizing/moving and follows
+   its z-order) drawn entirely with GDI rather than built from standard
+   BUTTON controls, so the "Avancar (segure)" button can implement genuine
+   press-and-hold semantics (WM_LBUTTONDOWN starts fast-forward, WM_LBUTTONUP
+   or losing mouse capture stops it) with the same code path as the other
+   three simple-click buttons, instead of needing to subclass a stock button
+   just to see raw mouse events.
+   NOTE: sits behind the game view if RetroArch is running in exclusive
+   (not windowed/borderless) fullscreen - D3D/GL exclusive fullscreen owns
+   the whole display output, and no other top-level window (topmost or not)
+   can paint over it. Works normally in windowed or borderless fullscreen. */
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+
+#define PB_TOOLBAR_CLASS "N02PlaybackToolbar"
+#define PB_TOOLBAR_BTN_COUNT 5
+#define PB_TOOLBAR_BTN_W 52
+#define PB_TOOLBAR_BTN_H 42
+#define PB_TOOLBAR_PAD 4
+#define PB_TOOLBAR_PROGRESS_H 10
+#define PB_TOOLBAR_W (PB_TOOLBAR_BTN_W * PB_TOOLBAR_BTN_COUNT + PB_TOOLBAR_PAD * (PB_TOOLBAR_BTN_COUNT + 1))
+#define PB_TOOLBAR_H (PB_TOOLBAR_PROGRESS_H + PB_TOOLBAR_PAD + PB_TOOLBAR_BTN_H + PB_TOOLBAR_PAD * 2)
+#define PB_TOOLBAR_ALPHA 210 /* out of 255 - "certa transparencia" over the game view */
+
+enum { PB_BTN_REWIND = 0, PB_BTN_PAUSE, PB_BTN_HOLDFF, PB_BTN_TOGGLEFF, PB_BTN_STOP };
+
+static HWND s_pb_toolbar = NULL;
+static HWND s_pb_tooltip = NULL;
+static int  s_pb_toolbar_hover = -1;
+static bool s_pb_toolbar_holdff_down = false;
+
+/* Mirrors the FASTMOTION hotkey block's own on/off transitions exactly
+   (runloop.c, "Check fastmotion hotkeys") - shared by both FF toolbar
+   buttons below instead of duplicating that logic per-button. */
+static void PlaybackSetFastForward(bool on) {
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   input_driver_state_t *input_st = input_state_get_ptr();
+   video_driver_state_t *video_st = video_state_get_ptr();
+   settings_t *settings = config_get_ptr();
+   bool currently_on = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
+
+   if (on == currently_on)
+      return;
+
+   if (on) {
+      input_st->flags |= INP_FLAG_NONBLOCKING;
+      runloop_st->flags |= RUNLOOP_FLAG_FASTMOTION;
+      command_event(CMD_EVENT_SET_FRAME_LIMIT, NULL);
+   } else {
+      input_st->flags &= ~INP_FLAG_NONBLOCKING;
+      runloop_st->flags &= ~RUNLOOP_FLAG_FASTMOTION;
+      runloop_st->fastforward_after_frames = 1;
+   }
+   driver_set_nonblock_state();
+   if (!on && settings->bools.frame_time_counter_reset_after_fastforwarding)
+      video_st->frame_time_count = 0;
+}
+
+static void PlaybackTogglePause(void) {
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+      command_event(CMD_EVENT_UNPAUSE, NULL);
+   else {
+      PlaybackSetFastForward(false); /* wouldn't make sense to still be fast-forwarding once paused */
+      command_event(CMD_EVENT_PAUSE, NULL);
+   }
+}
+
+static void PlaybackToolbarButtonRect(int index, RECT *out) {
+   out->left = PB_TOOLBAR_PAD + index * (PB_TOOLBAR_BTN_W + PB_TOOLBAR_PAD);
+   out->top = PB_TOOLBAR_PROGRESS_H + PB_TOOLBAR_PAD * 2;
+   out->right = out->left + PB_TOOLBAR_BTN_W;
+   out->bottom = out->top + PB_TOOLBAR_BTN_H;
+}
+
+static void PlaybackToolbarProgressRect(RECT *out) {
+   out->left = PB_TOOLBAR_PAD;
+   out->top = PB_TOOLBAR_PAD;
+   out->right = PB_TOOLBAR_W - PB_TOOLBAR_PAD;
+   out->bottom = out->top + PB_TOOLBAR_PROGRESS_H;
+}
+
+/* Tooltip text for each button - describes the action and matches the
+   actual configured keys for this deployment's retroarch.cfg
+   (input_pause_toggle=p, input_hold_fast_forward=l, input_toggle_fast_forward=space).
+   Static/state-independent text (covers both Pause and Continuar in one
+   line) rather than trying to keep a live tooltip in sync with the icon. */
+static const char *PlaybackToolbarButtonTooltip(int index) {
+   switch (index) {
+   case PB_BTN_REWIND:   return "Rebobinar (Seta esquerda)";
+   case PB_BTN_PAUSE:    return "Pausar / Continuar (P)";
+   case PB_BTN_HOLDFF:   return "Avancar rapido - segure (L)";
+   case PB_BTN_TOGGLEFF: return "Alternar velocidade do avanco rapido (Espaco)";
+   case PB_BTN_STOP:     return "Parar a reproducao (Esc)";
+   default: return "";
+   }
+}
+
+static void PlaybackDrawTriangleRight(HDC dc, int cx, int cy, int size, HBRUSH brush) {
+   POINT pts[3];
+   HGDIOBJ old_brush, old_pen;
+   pts[0].x = cx - size / 2; pts[0].y = cy - size / 2;
+   pts[1].x = cx - size / 2; pts[1].y = cy + size / 2;
+   pts[2].x = cx + size / 2; pts[2].y = cy;
+   old_brush = SelectObject(dc, brush);
+   old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+   Polygon(dc, pts, 3);
+   SelectObject(dc, old_pen);
+   SelectObject(dc, old_brush);
+}
+
+static void PlaybackDrawTriangleLeft(HDC dc, int cx, int cy, int size, HBRUSH brush) {
+   POINT pts[3];
+   HGDIOBJ old_brush, old_pen;
+   pts[0].x = cx + size / 2; pts[0].y = cy - size / 2;
+   pts[1].x = cx + size / 2; pts[1].y = cy + size / 2;
+   pts[2].x = cx - size / 2; pts[2].y = cy;
+   old_brush = SelectObject(dc, brush);
+   old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+   Polygon(dc, pts, 3);
+   SelectObject(dc, old_pen);
+   SelectObject(dc, old_brush);
+}
+
+static void PlaybackDrawBar(HDC dc, int cx, int cy, int w, int h, HBRUSH brush) {
+   RECT r;
+   r.left = cx - w / 2; r.right = cx + w / 2;
+   r.top = cy - h / 2; r.bottom = cy + h / 2;
+   FillRect(dc, &r, brush);
+}
+
+static void PlaybackToolbarPaint(HWND hwnd) {
+   PAINTSTRUCT ps;
+   HDC dc;
+   HBRUSH bg;
+   RECT client;
+   int i;
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
+   bool ff_on  = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
+
+   dc = BeginPaint(hwnd, &ps);
+   bg = CreateSolidBrush(RGB(24, 24, 24));
+   GetClientRect(hwnd, &client);
+   FillRect(dc, &client, bg);
+   DeleteObject(bg);
+
+   for (i = 0; i < PB_TOOLBAR_BTN_COUNT; i++) {
+      RECT r;
+      HBRUSH btn_bg, icon_brush;
+      bool is_down = (i == PB_BTN_HOLDFF && s_pb_toolbar_holdff_down);
+      int cx, cy;
+
+      PlaybackToolbarButtonRect(i, &r);
+      btn_bg = CreateSolidBrush(is_down ? RGB(90, 90, 20) : (i == s_pb_toolbar_hover ? RGB(70, 70, 70) : RGB(50, 50, 50)));
+      FillRect(dc, &r, btn_bg);
+      DeleteObject(btn_bg);
+      FrameRect(dc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+      cx = (r.left + r.right) / 2;
+      cy = (r.top + r.bottom) / 2;
+      icon_brush = CreateSolidBrush(RGB(240, 240, 240));
+
+      switch (i) {
+      case PB_BTN_REWIND:
+         PlaybackDrawTriangleLeft(dc, cx - 7, cy, 14, icon_brush);
+         PlaybackDrawTriangleLeft(dc, cx + 7, cy, 14, icon_brush);
+         break;
+      case PB_BTN_PAUSE:
+         if (paused)
+            PlaybackDrawTriangleRight(dc, cx, cy, 16, icon_brush);
+         else {
+            PlaybackDrawBar(dc, cx - 5, cy, 6, 18, icon_brush);
+            PlaybackDrawBar(dc, cx + 5, cy, 6, 18, icon_brush);
+         }
+         break;
+      case PB_BTN_HOLDFF:
+         PlaybackDrawTriangleRight(dc, cx - 7, cy, 14, icon_brush);
+         PlaybackDrawTriangleRight(dc, cx + 7, cy, 14, icon_brush);
+         break;
+      case PB_BTN_TOGGLEFF:
+         {
+            RECT textr = r;
+            PlaybackDrawTriangleRight(dc, cx - 7, cy - 6, 12, icon_brush);
+            PlaybackDrawTriangleRight(dc, cx + 7, cy - 6, 12, icon_brush);
+            textr.top = cy + 3;
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(240, 240, 240));
+            DrawTextA(dc, ff_on ? "1x" : "10x", -1, &textr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+         }
+         break;
+      case PB_BTN_STOP:
+         PlaybackDrawBar(dc, cx, cy, 16, 16, icon_brush);
+         break;
+      }
+      DeleteObject(icon_brush);
+   }
+
+   /* Progress bar - current position within the recording, not wall-clock
+      time (fast-forwarding covers ground faster without the bar looking
+      "wrong"). Hidden (just the empty track) if the total is unknown. */
+   {
+      RECT pr;
+      HBRUSH track, fill;
+      int frame_index = kailleraPlaybackGetFrameIndex();
+      int total = kailleraPlaybackGetTotalFrames();
+
+      PlaybackToolbarProgressRect(&pr);
+      track = CreateSolidBrush(RGB(60, 60, 60));
+      FillRect(dc, &pr, track);
+      DeleteObject(track);
+      FrameRect(dc, &pr, (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+      if (frame_index >= 0 && total > 0) {
+         RECT fr = pr;
+         double frac = (double)frame_index / (double)total;
+         if (frac < 0.0) frac = 0.0;
+         if (frac > 1.0) frac = 1.0;
+         fr.right = fr.left + (LONG)((fr.right - fr.left) * frac);
+         if (fr.right > fr.left) {
+            fill = CreateSolidBrush(RGB(90, 170, 90));
+            FillRect(dc, &fr, fill);
+            DeleteObject(fill);
+         }
+      }
+   }
+   EndPaint(hwnd, &ps);
+}
+
+static int PlaybackToolbarHitTest(int x, int y) {
+   int i;
+   for (i = 0; i < PB_TOOLBAR_BTN_COUNT; i++) {
+      RECT r;
+      PlaybackToolbarButtonRect(i, &r);
+      if (x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+         return i;
+   }
+   return -1;
+}
+
+static LRESULT CALLBACK PlaybackToolbarWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+   switch (msg) {
+   case WM_ERASEBKGND:
+      return 1;
+   case WM_PAINT:
+      PlaybackToolbarPaint(hwnd);
+      return 0;
+   case WM_LBUTTONDOWN:
+      {
+         int idx = PlaybackToolbarHitTest((short)LOWORD(lp), (short)HIWORD(lp));
+         if (idx == PB_BTN_REWIND)
+            kailleraPlaybackRequestRewind();
+         else if (idx == PB_BTN_PAUSE)
+            PlaybackTogglePause();
+         else if (idx == PB_BTN_HOLDFF) {
+            s_pb_toolbar_holdff_down = true;
+            SetCapture(hwnd);
+            PlaybackSetFastForward(true);
+         } else if (idx == PB_BTN_TOGGLEFF) {
+            runloop_state_t *runloop_st = runloop_state_get_ptr();
+            PlaybackSetFastForward(!(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION));
+         } else if (idx == PB_BTN_STOP) {
+            kailleraPlaybackStop();
+         }
+         InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return 0;
+   case WM_LBUTTONUP:
+      if (s_pb_toolbar_holdff_down) {
+         s_pb_toolbar_holdff_down = false;
+         ReleaseCapture();
+         PlaybackSetFastForward(false);
+         InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return 0;
+   case WM_MOUSEMOVE:
+      {
+         int idx = PlaybackToolbarHitTest((short)LOWORD(lp), (short)HIWORD(lp));
+         if (idx != s_pb_toolbar_hover) {
+            s_pb_toolbar_hover = idx;
+            InvalidateRect(hwnd, NULL, FALSE);
+         }
+      }
+      return 0;
+   case WM_CAPTURECHANGED:
+      /* Mouse released outside the button (drag-off) - stock button
+         controls handle this the same way; DefWindowProc doesn't apply
+         here since we own WM_LBUTTONUP ourselves, so mirror it explicitly. */
+      if (s_pb_toolbar_holdff_down) {
+         s_pb_toolbar_holdff_down = false;
+         PlaybackSetFastForward(false);
+         InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return 0;
+   case WM_MOUSEACTIVATE:
+      /* Never let clicking the toolbar activate it - that would steal
+         keyboard focus away from the game window, breaking every hotkey
+         (P, L, Space, Left...) until the user clicks back on the game to
+         refocus it. WS_EX_NOACTIVATE alone doesn't cover every activation
+         path reliably, so this is the belt-and-suspenders half of the
+         fix. */
+      return MA_NOACTIVATE;
+   case WM_DESTROY:
+      s_pb_toolbar = NULL;
+      return 0;
+   }
+   return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+static void PlaybackToolbarPosition(HWND toolbar) {
+   HWND game_hwnd;
+   RECT game_rect;
+   if (toolbar == NULL)
+      return;
+   game_hwnd = win32_get_window();
+   if (game_hwnd == NULL || !GetWindowRect(game_hwnd, &game_rect))
+      return;
+   {
+      int x = game_rect.left + (game_rect.right - game_rect.left - PB_TOOLBAR_W) / 2;
+      int y = game_rect.top + 20;
+      SetWindowPos(toolbar, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+   }
+}
+
+static void PlaybackToolbarCreateTooltip(HWND toolbar) {
+   INITCOMMONCONTROLSEX icx;
+   int i;
+
+   ZeroMemory(&icx, sizeof(icx));
+   icx.dwSize = sizeof(icx);
+   icx.dwICC = ICC_WIN95_CLASSES; /* needed for TOOLTIPS_CLASSA */
+   InitCommonControlsEx(&icx);
+
+   s_pb_tooltip = CreateWindowExA(WS_EX_TOPMOST | WS_EX_NOACTIVATE, TOOLTIPS_CLASSA, NULL,
+      WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+      CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+      toolbar, NULL, GetModuleHandle(NULL), NULL);
+   if (s_pb_tooltip == NULL)
+      return;
+
+   for (i = 0; i < PB_TOOLBAR_BTN_COUNT; i++) {
+      TOOLINFOA ti;
+      ZeroMemory(&ti, sizeof(ti));
+      ti.cbSize   = sizeof(ti);
+      ti.uFlags   = TTF_SUBCLASS; /* rect-based tool - several tools sharing one HWND (the toolbar), not TTF_IDISHWND */
+      ti.hwnd     = toolbar;
+      ti.hinst    = GetModuleHandle(NULL);
+      ti.uId      = (UINT_PTR)i;
+      ti.lpszText = (LPSTR)PlaybackToolbarButtonTooltip(i);
+      PlaybackToolbarButtonRect(i, &ti.rect);
+      SendMessageA(s_pb_tooltip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+   }
+}
+
+static void PlaybackToolbarEnsureCreated(void) {
+   WNDCLASSA wc;
+   HWND game_hwnd;
+
+   if (s_pb_toolbar != NULL)
+      return;
+
+   ZeroMemory(&wc, sizeof(wc));
+   wc.lpfnWndProc = PlaybackToolbarWndProc;
+   wc.hInstance = GetModuleHandle(NULL);
+   wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+   wc.lpszClassName = PB_TOOLBAR_CLASS;
+   RegisterClassA(&wc); /* fine to call again if a prior session already registered it */
+
+   game_hwnd = win32_get_window();
+   s_pb_toolbar = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED, PB_TOOLBAR_CLASS, "Reproducao de Replay",
+      WS_POPUP, 20, 20, PB_TOOLBAR_W, PB_TOOLBAR_H, game_hwnd, NULL, wc.hInstance, NULL);
+   if (s_pb_toolbar) {
+      SetLayeredWindowAttributes(s_pb_toolbar, 0, PB_TOOLBAR_ALPHA, LWA_ALPHA); /* "com certa transparencia" over the game view */
+      PlaybackToolbarPosition(s_pb_toolbar);
+      PlaybackToolbarCreateTooltip(s_pb_toolbar);
+   }
+}
+
+static void PlaybackToolbarSetVisible(bool visible) {
+   if (visible) {
+      PlaybackToolbarEnsureCreated();
+      if (s_pb_toolbar) {
+         PlaybackToolbarPosition(s_pb_toolbar);
+         ShowWindow(s_pb_toolbar, SW_SHOWNOACTIVATE);
+      }
+   } else if (s_pb_toolbar) {
+      ShowWindow(s_pb_toolbar, SW_HIDE);
+   }
+}
+
+#endif /* !N02_WIN32 && !N02_LINUX */
+
+void kailleraPlaybackRewindTick(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   static bool was_static_playback = false;
+   static bool old_left_pressed = false;
+   static bool old_esc_pressed = false;
+   bool esc_pressed;
+   int frame_index = kailleraPlaybackGetFrameIndex();
+   bool is_static_playback = (frame_index >= 0) && !kailleraRetryConnectActive();
+   bool left_pressed;
+   DWORD now;
+
+   /* Reset the ring the moment a static-Playback session starts OR ends -
+      cheapest way to guarantee a previous file's checkpoints never leak
+      into the next one. */
+   if (is_static_playback != was_static_playback)
+      PlaybackRewindReset();
+   was_static_playback = is_static_playback;
+   /* WS_EX_TOPMOST floats the toolbar above EVERY window, not just
+      RetroArch's - only actually show it while the game window is the
+      foreground one, so alt-tabbing away doesn't leave it plastered over
+      whatever else the user switches to. */
+   PlaybackToolbarSetVisible(is_static_playback && GetForegroundWindow() == win32_get_window());
+
+   if (!is_static_playback) {
+      old_left_pressed = false;
+      old_esc_pressed = false;
+      s_pb_virtual_rewind_request = false;
+      return;
+   }
+
+   PlaybackToolbarPosition(s_pb_toolbar); /* cheap - tracks the game window moving/resizing */
+   if (s_pb_toolbar)
+      InvalidateRect(s_pb_toolbar, NULL, FALSE); /* Pause/FF button labels reflect live state, which can change from the keyboard too */
+
+   /* Esc = Stop, mirroring the toolbar's Stop button - safe to bind
+      directly (bypassing the input-remapping system, same as Left/Enter
+      elsewhere in this file) because RetroArch's own native quit hotkey is
+      already unconditionally disabled for the whole duration of any
+      Kaillera session, Playback included (runloop.c's quit-hotkey check:
+      "if (kailleraInitialised) trig_quit_key = false;"), so this can't
+      race with or accidentally trigger "exit emulator". */
+   esc_pressed = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) ? true : false;
+   if (esc_pressed && !old_esc_pressed)
+      kailleraPlaybackStop();
+   old_esc_pressed = esc_pressed;
+
+   now = GetTickCount();
+
+   /* A rewind gesture that's gone quiet (no Left press for
+      PLAYBACK_REWIND_GESTURE_MS) means the user has moved on from wherever
+      they landed - capture a checkpoint right there (bypassing the normal
+      ~10s spacing) and close the gesture, so the NEXT Left press counts
+      from zero relative to HERE instead of stacking onto however many steps
+      were taken before. Without this, briefly resuming play for only a
+      couple of seconds and then rewinding again would jump back much
+      further than expected, relative to the ORIGINAL live edge rather than
+      to this recent point. */
+   if (s_pb_rewind_gesture_until != 0 && (LONG)(now - s_pb_rewind_gesture_until) >= 0) {
+      PlaybackRewindMaybeCapture(frame_index, true);
+      s_pb_rewind_steps = 0;
+      s_pb_rewind_gesture_until = 0;
+   } else {
+      PlaybackRewindMaybeCapture(frame_index, false);
+   }
+
+   left_pressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) ? true : false;
+   {
+      bool left_triggered = (left_pressed && !old_left_pressed) || s_pb_virtual_rewind_request;
+      s_pb_virtual_rewind_request = false;
+      old_left_pressed = left_pressed;
+      left_pressed = left_triggered; /* repurpose for the trigger check below - real edge OR the toolbar's one-shot request */
+   }
+   if (left_pressed) {
+      if (s_pb_rewind_gesture_until == 0)
+         s_pb_rewind_steps = 0; /* fresh gesture, not a rapid repeat of a previous one - don't stack on old steps */
+
+      if (s_pb_rewind_steps < s_pb_checkpoint_count) {
+         int idx;
+         PlaybackCheckpoint *cp;
+         retro_ctx_serialize_info_t info;
+
+         s_pb_rewind_steps++;
+         idx = (s_pb_checkpoint_next - s_pb_rewind_steps + PLAYBACK_CHECKPOINT_COUNT * 2) % PLAYBACK_CHECKPOINT_COUNT;
+         cp = &s_pb_checkpoints[idx];
+
+         info.data_const = cp->data;
+         info.data       = NULL;
+         info.size       = cp->size;
+         core_unserialize(&info);
+         kailleraPlaybackSeekToFrame(cp->frame_index);
+         /* Deliberately doesn't touch pause state either way - keeps
+            playing right on if it was already running (no need to hit
+            Resume after every rewind tap), and stays put if the user had
+            paused first to scrub through checkpoints one at a time. */
+
+         s_pb_rewind_gesture_until = now + PLAYBACK_REWIND_GESTURE_MS;
+         if (s_pb_rewind_gesture_until == 0)
+            s_pb_rewind_gesture_until = 1;
+      } else {
+         runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      }
+   }
+#endif
+}
+
+/* retry-connect: while the host searches for the right moment, every single
+   Pause it presses immediately hands off a fresh savestate (see
+   kailleraRetryConnectCaptureAndSendState(), called from the pause hotkey
+   block in runloop.c) - the peer just applies whichever one arrived most
+   recently (raw core_unserialize(), staying paused - see
+   ApplyRetryConnectStateReady()), as many times as the host
+   pauses/resumes/re-pauses. Only once the host commits with Enter does
+   anything about *releasing* control happen, via this small hand-off
+   sequence:
+     1. RC_SEQ_HOST_PRE_GO_LIVE - host waits a small timeout (still paused)
+        before actually sending RC_ACTION_GO_LIVE, so the pause has fully
+        settled first;
+     2. host sends RC_ACTION_GO_LIVE and immediately starts
+        RC_SEQ_COUNTDOWN itself - no state to capture here, the last Pause
+        already sent the one that matters;
+     3. the peer, on receiving RC_ACTION_GO_LIVE, starts RC_SEQ_COUNTDOWN
+        too - it's already sitting correctly loaded from the last
+        RC_ACTION_STATE_READY.
+   An earlier version had the peer briefly UNPAUSE for ~1s after each
+   RC_ACTION_STATE_READY (then reload the same state and re-pause) to work
+   around a cosmetic pause-menu-cursor glitch after a raw unserialize - that
+   was removed after it turned out to be the actual cause of full game
+   desyncs later in the resumed match: it made the peer run real emulation
+   through a savestate round-trip the host's own core never went through,
+   and this core's serialize/unserialize isn't provably complete (RetroArch's
+   own netplay refuses to trust a core reporting
+   RETRO_SERIALIZATION_QUIRK_INCOMPLETE for exactly this reason - see
+   network/netplay/netplay_frontend.c). A cosmetic glitch beats a desynced
+   match; if the cursor issue needs solving again, it'll need a fix that
+   doesn't run the core forward at all (e.g. an explicit menu-state refresh
+   call instead of "play a second of real frames").
+   GetTickCount()-based throughout (this file is Windows-only - see the
+   N02_WIN32/N02_LINUX guards elsewhere); the subtraction-and-compare form is
+   the standard idiom for comparing tick counts safely across a wraparound. */
+enum {
+   RC_SEQ_NONE = 0,
+   RC_SEQ_HOST_PRE_GO_LIVE,
+   RC_SEQ_COUNTDOWN,
+};
+
+#define RETRYCONNECT_PRE_GO_LIVE_MS 500
+#define RETRYCONNECT_COUNTDOWN_MS   5000
+
+/* How long after the countdown ends (both host and peer unpause and the
+   real Kaillera netcode resumes normally) local controller input keeps
+   getting sent as neutral (nothing pressed) instead of whatever the player
+   is actually holding - see kailleraRetryConnectSuppressLocalInput() and its
+   call site in runloop.c. The idea: whatever a player happened to be
+   physically holding at the exact moment control comes back is arbitrary
+   and unsynchronized between machines (each side samples it at a slightly
+   different wall-clock instant); giving both sides one guaranteed second of
+   clean, deterministic neutral frames before real input starts flowing
+   means the first REAL input either side contributes lines up on both ends
+   the same way any other frame of live play would, instead of racing
+   against the transition itself. */
+#define RETRYCONNECT_NEUTRAL_INPUT_MS 1000
+
+static int   s_rc_seq = RC_SEQ_NONE;
+static DWORD s_rc_seq_deadline = 0;
+static DWORD s_rc_neutral_input_until = 0;
+static int   s_rc_last_announced_second = -1;
+
+bool kailleraRetryConnectSuppressLocalInput() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return false;
+#else
+   return s_rc_neutral_input_until != 0 && (LONG)(GetTickCount() - s_rc_neutral_input_until) < 0;
+#endif
+}
+
+static void RetryConnectStartCountdown(void) {
+   s_rc_seq = RC_SEQ_COUNTDOWN;
+   s_rc_seq_deadline = GetTickCount() + RETRYCONNECT_COUNTDOWN_MS;
+   if (s_rc_seq_deadline == 0)
+      s_rc_seq_deadline = 1;
+   s_rc_last_announced_second = -1;
+}
+
+void kailleraRetryConnectCaptureAndSendState() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   size_t state_size = core_serialize_size();
+   void  *state_buf  = state_size ? malloc(state_size) : NULL;
+
+   if (state_buf != NULL) {
+      retro_ctx_serialize_info_t info;
+      info.data       = state_buf;
+      info.data_const = NULL;
+      info.size       = state_size;
+      if (core_serialize(&info)) {
+         kailleraRetryConnectUploadState(state_buf, (int)state_size);
+      } else
+         kailleraRetryConnectNotify(RC_ACTION_PAUSE);
+      free(state_buf);
+   } else {
+      kailleraRetryConnectNotify(RC_ACTION_PAUSE);
+   }
+#endif
+}
+
+/* Downloads the state the host just uploaded and loads it, staying paused -
+   called from DispatchRetryConnectAction() below on RC_ACTION_STATE_READY,
+   every single time the host pauses (any number of times per session). Does
+   NOT run the core forward at all (see the big comment above for why an
+   earlier version's brief-unpause "settle" window was removed - it was
+   causing real match desyncs). */
+static void ApplyRetryConnectStateReady(void) {
+   size_t state_size = core_serialize_size();
+   void* state_buf;
+   int n;
+
+   if (state_size == 0) {
+      command_event(CMD_EVENT_PAUSE, NULL);
+      return;
+   }
+
+   state_buf = malloc(state_size);
+   if (state_buf == NULL) {
+      command_event(CMD_EVENT_PAUSE, NULL);
+      return;
+   }
+
+   n = kailleraRetryConnectDownloadState(state_buf, (int)state_size, NULL);
+   if (n > 0 && (size_t)n == state_size) {
+      retro_ctx_serialize_info_t info;
+      info.data_const = state_buf;
+      info.data       = NULL;
+      info.size       = (size_t)n;
+      core_unserialize(&info);
+      free(state_buf);
+      command_event(CMD_EVENT_PAUSE, NULL);
+      return;
+   }
+
+   runloop_msg_queue_push("retry-connect: falha ao sincronizar o state save do host.", 0, 5 * 60, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+   free(state_buf);
+   command_event(CMD_EVENT_PAUSE, NULL);
+}
+
+/* Ticks whichever stage is currently pending - call unconditionally from
+   both kailleraRetryConnectFrameTick() (a peer could still be in its
+   initial few seconds of unpaused free-play - see
+   RETRYCONNECT_PEER_INITIAL_PLAY_MS below - when RC_ACTION_GO_LIVE arrives
+   and starts RC_SEQ_COUNTDOWN, so this needs covering from the unpaused
+   path too) and kailleraRetryConnectPauseTick() (the overwhelmingly common
+   case, since every stage normally runs paused). A no-op the overwhelmingly
+   common time nothing is pending. */
+static void TickRetryConnectSequence(void) {
+   switch (s_rc_seq) {
+   case RC_SEQ_HOST_PRE_GO_LIVE:
+      if ((LONG)(GetTickCount() - s_rc_seq_deadline) >= 0) {
+         /* One more, authoritative capture right before declaring go-live -
+            confirmed via the sync-checksum diagnostic that the host's own
+            "paused" state can still drift by a frame or so between the last
+            user-initiated Pause and this exact instant (a one-frame race in
+            the pause hotkey handling, runloop.c - the frame Pause is
+            pressed on can still run core_run() once more, with the OLD
+            input, before actually freezing), so the snapshot taken back
+            then is not reliably identical to what the host is actually
+            sitting on right now. Re-sending here guarantees the peer loads
+            EXACTLY the state the host is about to go live from, instead of
+            whatever it happened to be a Pause or two ago. */
+         kailleraRetryConnectCaptureAndSendState();
+         kailleraRetryConnectNotify(RC_ACTION_GO_LIVE);
+         RetryConnectStartCountdown();
+      }
+      break;
+   case RC_SEQ_COUNTDOWN:
+      {
+         LONG remaining_ms = (LONG)(s_rc_seq_deadline - GetTickCount());
+         if (remaining_ms <= 0) {
+            s_rc_seq = RC_SEQ_NONE;
+            s_rc_neutral_input_until = GetTickCount() + RETRYCONNECT_NEUTRAL_INPUT_MS;
+            if (s_rc_neutral_input_until == 0)
+               s_rc_neutral_input_until = 1;
+            command_event(CMD_EVENT_UNPAUSE, NULL);
+            kailleraRetryConnectRefreshPlaybackMode();
+         } else {
+            /* retry-connect: on-screen countdown, once per second - purely
+               local (each side counts down its own instance of this same
+               stage independently, both started within a network
+               round-trip of each other), no need to broadcast it over game
+               chat and risk two independent countdowns interleaving there. */
+            int remaining_seconds = (remaining_ms + 999) / 1000;
+            if (remaining_seconds != s_rc_last_announced_second) {
+               char msg[64];
+               s_rc_last_announced_second = remaining_seconds;
+               snprintf(msg, sizeof(msg), "A partida iniciara em %d...", remaining_seconds);
+               runloop_msg_queue_push(msg, 0, 60, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            }
+         }
+      }
+      break;
+   default:
+      break;
+   }
+}
+
+/* Shared by kailleraRetryConnectFrameTick() (still running) and
+   kailleraRetryConnectPauseTick() (already paused) below - a remote action
+   can arrive while we're in either state, and both need to react the same
+   way once it does. */
+static void DispatchRetryConnectAction(int action) {
+   switch (action) {
+   case RC_ACTION_PAUSE:
+      command_event(CMD_EVENT_PAUSE, NULL);
+      break;
+   case RC_ACTION_RESUME:
+      command_event(CMD_EVENT_UNPAUSE, NULL);
+      break;
+   case RC_ACTION_GO_LIVE:
+      /* The host's final commit (Enter) - peer is already sitting correctly
+         loaded from the last RC_ACTION_STATE_READY, nothing left to settle;
+         go straight to the shared release countdown. */
+      RetryConnectStartCountdown();
+      break;
+   case RC_ACTION_STATE_READY:
+      ApplyRetryConnectStateReady();
+      break;
+   default:
+      break;
+   }
+}
+
+/* Call once per core_run() frame (unlike kailleraRetryConnectPauseTick()
+   below, this runs while NOT paused - the common case, since fast-forward is
+   host-only and purely local: everyone else just keeps playing the replay
+   at their own pace until the host's next signal arrives). Drains the same
+   mailbox kailleraRetryConnectPauseTick() drains while paused, so a peer
+   reacts to the host regardless of whether it happens to be paused already
+   when the message shows up. */
+#define RETRYCONNECT_PEER_INITIAL_PLAY_MS 5000
+static DWORD s_peer_initial_pause_deadline = 0;
+
+void kailleraRetryConnectFrameTick() {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   int action, frame_index;
+
+   /* retry-connect: let the peer play the first few seconds of the group
+      replay for real (visual continuity with the match, rather than an
+      instant freeze), then auto-pause and just wait - the host is
+      deliberately excluded here, it keeps running normally right away,
+      free to fast-forward/scrub on its own from the very start. The
+      "Aguardando ..." announce (kaillera-client's
+      kaillera_retryconnect_host_select()) is timed to land around the same
+      moment this fires. */
+   {
+      static bool was_active = false;
+      bool now_active = kailleraRetryConnectActive();
+      if (now_active && !was_active && !kailleraRetryConnectCanControl()) {
+         s_peer_initial_pause_deadline = GetTickCount() + RETRYCONNECT_PEER_INITIAL_PLAY_MS;
+         if (s_peer_initial_pause_deadline == 0)
+            s_peer_initial_pause_deadline = 1;
+      }
+      was_active = now_active;
+   }
+   if (s_peer_initial_pause_deadline != 0 &&
+         (LONG)(GetTickCount() - s_peer_initial_pause_deadline) >= 0) {
+      s_peer_initial_pause_deadline = 0;
+      command_event(CMD_EVENT_PAUSE, NULL);
+   }
+
+   /* Covers the rare case where RC_ACTION_GO_LIVE arrives while still in the
+      initial unpaused free-play window above - see TickRetryConnectSequence()'s
+      own doc comment. */
+   TickRetryConnectSequence();
+
+   if (kailleraRetryConnectPollF == NULL)
+      return;
+
+   action = 0;
+   frame_index = 0;
+   while (kailleraRetryConnectPollF(&action, &frame_index))
+      DispatchRetryConnectAction(action);
+#endif
+}
+
 void kailleraRetryConnectPauseTick() {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
@@ -473,39 +1473,33 @@ void kailleraRetryConnectPauseTick() {
    if (kailleraRetryConnectPollF == NULL)
       return;
 
-   /* Enter (go live) - host only, only while actually paused (this function
-      only runs from RUNLOOP_STATE_PAUSE, so we know we are). No native
-      RetroArch hotkey exists for this, so it's a direct key check here
-      rather than going through the input-remapping/hotkey system. */
-   if (kailleraRetryConnectCanControl()) {
+   /* Enter (commit to this point) - host only, only while actually paused
+      (this function only runs from RUNLOOP_STATE_PAUSE, so we know we are).
+      No native RetroArch hotkey exists for this, so it's a direct key check
+      here rather than going through the input-remapping/hotkey system.
+      Starts the multi-stage hand-off sequence (see the big comment above
+      ApplyRetryConnectStateReady()) rather than doing anything immediately. */
+   if (kailleraRetryConnectCanControl() && s_rc_seq == RC_SEQ_NONE) {
       enter_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000) ? true : false;
       if (enter_pressed && !old_enter_pressed) {
-         command_event(CMD_EVENT_UNPAUSE, NULL);
-         kailleraRetryConnectNotify(RC_ACTION_GO_LIVE);
-         kailleraRetryConnectRefreshPlaybackMode();
+         s_rc_seq = RC_SEQ_HOST_PRE_GO_LIVE;
+         s_rc_seq_deadline = GetTickCount() + RETRYCONNECT_PRE_GO_LIVE_MS;
+         if (s_rc_seq_deadline == 0)
+            s_rc_seq_deadline = 1;
       }
       old_enter_pressed = enter_pressed;
    }
 
-   /* Remote RESUME/GO_LIVE arriving while we're already paused - the normal
-      per-frame drain (kaillera_retryconnect_pump(), called from
-      kailleraModifyPlayValuesF()) does not run at all while paused, so this
-      is the only place a paused client ever sees these. */
+   TickRetryConnectSequence();
+
+   /* Remote RESUME/GO_LIVE/STATE_READY arriving while we're already paused -
+      the normal per-frame drain (kailleraRetryConnectFrameTick(), called from
+      core_run()) does not run at all while paused, so this is the only place
+      a paused client ever sees these. */
    action = 0;
    frame_index = 0;
-   while (kailleraRetryConnectPollF(&action, &frame_index)) {
-      switch (action) {
-      case RC_ACTION_RESUME:
-         command_event(CMD_EVENT_UNPAUSE, NULL);
-         break;
-      case RC_ACTION_GO_LIVE:
-         command_event(CMD_EVENT_UNPAUSE, NULL);
-         kailleraRetryConnectRefreshPlaybackMode();
-         break;
-      default:
-         break;
-      }
-   }
+   while (kailleraRetryConnectPollF(&action, &frame_index))
+      DispatchRetryConnectAction(action);
 #endif
 }
 
