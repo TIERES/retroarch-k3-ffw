@@ -26,6 +26,8 @@ static pthread_t threadk;
 #include "input/input_driver.h"
 #include "gfx/video_driver.h"
 #include <commctrl.h> /* TOOLTIPS_CLASSA - playback toolbar's button tooltips */
+#include <commdlg.h> /* GetOpenFileNameA - kailleraFindOrBrowseGame()'s manual-pick fallback */
+#include "file/file_path.h" /* path_is_valid/fill_pathname_basedir - same fallback's folder search */
 
  
 bool kailleraInitialised;
@@ -335,6 +337,12 @@ int (WINAPI* kailleraRetryConnectActiveF)();
 void (WINAPI* kailleraRetryConnectUploadStateF)(const void* data, int size);
 int (WINAPI* kailleraRetryConnectDownloadStateF)(void* outBuffer, int bufferCap, int* outFrameIndex);
 
+/* Host-only local rewind support (toolbar "Rebobinar" button) - optional,
+   same convention. See kaillera.h. */
+int (WINAPI* kailleraRetryConnectGetFrameIndexF)();
+int (WINAPI* kailleraRetryConnectGetTotalFramesF)();
+void (WINAPI* kailleraRetryConnectSeekLocalF)(int frame_index);
+
 /* Playback checkpoint rewind - optional, same convention. See kaillera.h's
    kailleraPlaybackRewindTick(). */
 int (WINAPI* kailleraPlaybackGetFrameIndexF)();
@@ -375,6 +383,139 @@ static DWORD WINAPI kailleraThread(LPVOID pParam) {
 
 //static void WINAPI kailleraMoreInfosCallback(char* gamename) {}
 
+// Appends a new entry to kailleraRomNames/filePathK/corePaths at runtime
+// (AddGamesToList() itself only ever runs once, from the user's content
+// history) - used by kailleraFindOrBrowseGame() below so nGameLoad() can
+// resolve a manually-located ROM completely normally, the same as any
+// pre-existing history entry, once the room's match actually starts.
+// Recomputes the current end-of-blob write position by walking the
+// existing double-null-terminated entries from the start rather than
+// trusting kailleraGames' exact resting position (AddGamesToList() leaves
+// it one byte past the natural next-entry slot - see its own trailing
+// "*++kailleraGames = '\0';") - this runs at most once per failed room
+// join, so the O(totalGames) walk costs nothing.
+static bool AppendGameEntry(const char* displayName, const char* filePath, const char* corePath) {
+   char* p;
+   size_t remaining, needed;
+   int i;
+
+   if (totalGames >= MAX_GAMES)
+      return false;
+
+   p = kailleraRomNames;
+   for (i = 0; i < totalGames; i++)
+      p += strlen(p) + 1;
+
+   remaining = sizeof(kailleraRomNames) - (size_t)(p - kailleraRomNames);
+   needed = strlen(displayName) + 2; /* the entry's own NUL + the final double-NUL byte */
+   if (needed > remaining)
+      return false; /* blob genuinely full - not expected in practice */
+
+   strlcpy(p, displayName, remaining);
+   p += strlen(displayName) + 1;
+   *p = '\0'; /* new end-of-list marker */
+   kailleraGames = p;
+
+   strlcpy(filePathK[totalGames], filePath, sizeof(filePathK[totalGames]));
+   strlcpy(corePaths[totalGames], corePath, sizeof(corePaths[totalGames]));
+   totalGames++;
+   return true;
+}
+
+// Native "pick a file" dialog - the same one Ctrl+O itself normally opens
+// (see gfx/common/win32_common.c's ID_M_LOAD_CONTENT handler), which is
+// otherwise unconditionally disabled for the whole duration of a Kaillera
+// session ("if (kailleraInitialised) break;", same file). Pre-filters by
+// the wanted file's own extension so the picker starts useful. Returns
+// false if the user cancelled.
+static bool BrowseForGameFile(const char* wantedFilename, char* outPath, size_t outPathCap) {
+   OPENFILENAMEA ofn;
+   char fileBuf[1024];
+   char filter[300];
+   const char* ext = strrchr(wantedFilename, '.');
+   int pos = 0;
+
+   ZeroMemory(fileBuf, sizeof(fileBuf));
+   ZeroMemory(&ofn, sizeof(ofn));
+
+   if (ext != NULL) {
+      pos += _snprintf(filter + pos, sizeof(filter) - pos, "Arquivo esperado (*%s)", ext); filter[pos++] = 0;
+      pos += _snprintf(filter + pos, sizeof(filter) - pos, "*%s", ext); filter[pos++] = 0;
+   }
+   pos += _snprintf(filter + pos, sizeof(filter) - pos, "Todos os arquivos (*.*)"); filter[pos++] = 0;
+   pos += _snprintf(filter + pos, sizeof(filter) - pos, "*.*"); filter[pos++] = 0;
+   filter[pos++] = 0; /* final double-NUL terminator OPENFILENAME's lpstrFilter requires */
+
+   ofn.lStructSize = sizeof(ofn);
+   ofn.hwndOwner = win32_get_window();
+   ofn.lpstrFilter = filter;
+   ofn.lpstrFile = fileBuf;
+   ofn.nMaxFile = sizeof(fileBuf);
+   ofn.lpstrTitle = "Selecione o arquivo do jogo";
+   ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+
+   if (!GetOpenFileNameA(&ofn))
+      return false;
+
+   strlcpy(outPath, fileBuf, outPathCap);
+   return true;
+}
+
+// Called (via the new kInfos.findOrBrowseGameCallback) when the DLL's own
+// plain-string match against kailleraRomNames failed for a room the user
+// is trying to join - kaillera_ui.cpp's kailelra_sdlg_join_selected_game()
+// would otherwise immediately show "The rom '...' is not in your list."
+// Tries, in order:
+//   1. Search every folder already referenced by a content-history entry
+//      for a file with the exact wanted filename (same folder as some ROM
+//      the user has played before - the common case for anyone with more
+//      than one ROM per folder). Naturally a no-op when the history is
+//      empty (the loop just doesn't run), falling straight through to (2).
+//   2. Fall back to the native file-pick dialog above, paired with
+//      whichever core is currently loaded (this only ever runs from
+//      inside an already-active Kaillera session, which requires a core
+//      to already be running - the overwhelmingly common case is picking
+//      a different ROM for that SAME system/core).
+// Either way, on success the match is registered into kailleraRomNames/
+// filePathK/corePaths under the EXACT wanted display name (AppendGameEntry()
+// above), so nGameLoad() resolves it completely normally - exactly like
+// any pre-existing history entry - once the match actually starts; nothing
+// about that existing load pipeline needs to change.
+// wantedGame: the exact "<core>: <filename>" string the room expects (same
+// format AddGamesToList() produces, since that's what's being compared
+// against). Returns 1 if a file was found/picked (join may proceed), 0 if
+// the user cancelled the picker (caller should show its own "not in your
+// list" error).
+static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
+   const char* sep = strstr(wantedGame, ": ");
+   const char* wantedFilename = sep ? sep + 2 : wantedGame;
+   char candidate[1024];
+   char corePath[512];
+   bool found = false;
+   int i;
+
+   for (i = 0; i < totalGames && !found; i++) {
+      if (!path_is_valid(filePathK[i]))
+         continue;
+      fill_pathname_basedir(candidate, filePathK[i], sizeof(candidate));
+      strlcat(candidate, wantedFilename, sizeof(candidate));
+      if (path_is_valid(candidate)) {
+         strlcpy(corePath, corePaths[i], sizeof(corePath));
+         found = true;
+      }
+   }
+
+   if (!found) {
+      const char* currentCore = path_get(RARCH_PATH_CORE);
+      if (!BrowseForGameFile(wantedFilename, candidate, sizeof(candidate)))
+         return 0; /* user cancelled - caller shows its own error */
+      strlcpy(corePath, currentCore ? currentCore : "", sizeof(corePath));
+   }
+
+   AppendGameEntry(wantedGame, candidate, corePath);
+   return 1;
+}
+
 static int InitialiseKaillera() {
    kailleraInfos kInfos;
 
@@ -384,6 +525,7 @@ static int InitialiseKaillera() {
    kInfos.chatReceivedCallback = kailleraChatReceivedCallback;
    kInfos.clientDroppedCallback = kailleraClientDroppedCallback;
    kInfos.moreInfosCallback = NULL; //kailleraMoreInfosCallback; //not used (support only supraclient)
+   kInfos.findOrBrowseGameCallback = kailleraFindOrBrowseGame;
    kailleraInitF();
    kailleraSetInfosF(&kInfos);
    KailleraHandle = CreateThread(NULL, 0, kailleraThread, NULL, 0, 0);
@@ -416,6 +558,9 @@ void LoadKaillera() {
       kailleraRetryConnectActiveF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectActive");
       kailleraRetryConnectUploadStateF = (void (WINAPI*)(const void*, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectUploadState");
       kailleraRetryConnectDownloadStateF = (int (WINAPI*)(void*, int, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectDownloadState");
+      kailleraRetryConnectGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectGetFrameIndex");
+      kailleraRetryConnectGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectGetTotalFrames");
+      kailleraRetryConnectSeekLocalF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectSeekLocal");
       kailleraPlaybackGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackGetFrameIndex");
       kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "kailleraPlaybackSeekToFrame");
       kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackGetTotalFrames");
@@ -442,6 +587,9 @@ void LoadKaillera() {
       kailleraRetryConnectActiveF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectActive@0");
       kailleraRetryConnectUploadStateF = (void (WINAPI*)(const void*, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectUploadState@8");
       kailleraRetryConnectDownloadStateF = (int (WINAPI*)(void*, int, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectDownloadState@12");
+      kailleraRetryConnectGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectGetFrameIndex@0");
+      kailleraRetryConnectGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectGetTotalFrames@0");
+      kailleraRetryConnectSeekLocalF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectSeekLocal@4");
       kailleraPlaybackGetFrameIndexF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackGetFrameIndex@0");
       kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "_kailleraPlaybackSeekToFrame@4");
       kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackGetTotalFrames@0");
@@ -537,6 +685,37 @@ int kailleraRetryConnectDownloadState(void* outBuffer, int bufferCap, int* outFr
    if (kailleraRetryConnectDownloadStateF == NULL)
       return -1;
    return kailleraRetryConnectDownloadStateF(outBuffer, bufferCap, outFrameIndex);
+#endif
+}
+
+/* Host-only local rewind support (toolbar "Rebobinar" button) - see
+   kaillera.h and the retry-connect checkpoint ring further below. */
+static int kailleraRetryConnectGetFrameIndex(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return -1;
+#else
+   if (kailleraRetryConnectGetFrameIndexF == NULL)
+      return -1;
+   return kailleraRetryConnectGetFrameIndexF();
+#endif
+}
+
+static int kailleraRetryConnectGetTotalFrames(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return -1;
+#else
+   if (kailleraRetryConnectGetTotalFramesF == NULL)
+      return -1;
+   return kailleraRetryConnectGetTotalFramesF();
+#endif
+}
+
+static void kailleraRetryConnectSeekLocal(int frame_index) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)frame_index;
+#else
+   if (kailleraRetryConnectSeekLocalF != NULL)
+      kailleraRetryConnectSeekLocalF(frame_index);
 #endif
 }
 
@@ -780,6 +959,116 @@ static void PlaybackRewindMaybeCapture(int frame_index, bool force) {
    s_pb_last_checkpoint_frame = frame_index;
 }
 
+/* Checkpoint-based rewind for retry-connect's group replay - host-only
+   (only the host navigates; a peer's own view is always overwritten by the
+   host's next broadcast anyway, same reasoning as the FF handoff). Mirrors
+   the solo-Playback ring above (same interval/count, same core_serialize()
+   capture), but kept as its own separate ring rather than sharing
+   s_pb_checkpoints - the two modes are mutually exclusive but have
+   independent lifetimes (kailleraRetryConnectActive() vs "is static
+   Playback"), and the rewind here has to broadcast to every peer afterward
+   (kailleraRetryConnectSeekLocal() + kailleraRetryConnectUploadState()) while
+   solo Playback's stays purely local - simplest to keep them from ever being
+   able to interfere with each other. */
+#define RC_CHECKPOINT_INTERVAL_FRAMES 600 /* ~10s at 60fps, same spacing as solo Playback */
+#define RC_CHECKPOINT_COUNT 10
+static PlaybackCheckpoint s_rc_checkpoints[RC_CHECKPOINT_COUNT];
+static int s_rc_checkpoint_count = 0;
+static int s_rc_checkpoint_next = 0;
+static int s_rc_last_checkpoint_frame = -1;
+
+static void RetryConnectCheckpointReset(void) {
+   int i;
+   for (i = 0; i < RC_CHECKPOINT_COUNT; i++) {
+      free(s_rc_checkpoints[i].data);
+      s_rc_checkpoints[i].data = NULL;
+      s_rc_checkpoints[i].size = 0;
+   }
+   s_rc_checkpoint_count = 0;
+   s_rc_checkpoint_next = 0;
+   s_rc_last_checkpoint_frame = -1;
+}
+
+static void RetryConnectCheckpointMaybeCapture(int frame_index) {
+   size_t state_size;
+   void *state_buf;
+   retro_ctx_serialize_info_t info;
+   PlaybackCheckpoint *slot;
+
+   if (s_rc_last_checkpoint_frame < 0) {
+      s_rc_last_checkpoint_frame = frame_index;
+      return;
+   }
+   if (frame_index - s_rc_last_checkpoint_frame < RC_CHECKPOINT_INTERVAL_FRAMES)
+      return;
+
+   state_size = core_serialize_size();
+   if (state_size == 0)
+      return;
+   state_buf = malloc(state_size);
+   if (state_buf == NULL)
+      return;
+   info.data       = state_buf;
+   info.data_const = NULL;
+   info.size       = state_size;
+   if (!core_serialize(&info)) {
+      free(state_buf);
+      return;
+   }
+
+   slot = &s_rc_checkpoints[s_rc_checkpoint_next];
+   free(slot->data);
+   slot->data        = state_buf;
+   slot->size        = state_size;
+   slot->frame_index = frame_index;
+
+   s_rc_checkpoint_next = (s_rc_checkpoint_next + 1) % RC_CHECKPOINT_COUNT;
+   if (s_rc_checkpoint_count < RC_CHECKPOINT_COUNT)
+      s_rc_checkpoint_count++;
+   s_rc_last_checkpoint_frame = frame_index;
+}
+
+/* Host-only: restores the newest checkpoint strictly before the current
+   position, locally (core_unserialize() + kailleraRetryConnectSeekLocal()),
+   then re-uses the existing kailleraRetryConnectUploadState() hand-off to
+   broadcast it - every peer converges via the SAME already-working
+   RC_ACTION_STATE_READY path a normal Pause already uses, no peer-side
+   changes needed. No-op if there's nothing earlier to rewind to. */
+static void RetryConnectRequestRewind(void) {
+   int current_frame, i, best_frame = -1, target = -1;
+
+   if (!kailleraRetryConnectCanControl())
+      return;
+   current_frame = kailleraRetryConnectGetFrameIndex();
+   if (current_frame < 0)
+      return;
+
+   for (i = 0; i < s_rc_checkpoint_count; i++) {
+      PlaybackCheckpoint *cp = &s_rc_checkpoints[i];
+      if (cp->data != NULL && cp->frame_index < current_frame && cp->frame_index > best_frame) {
+         best_frame = cp->frame_index;
+         target = i;
+      }
+   }
+   if (target < 0) {
+      runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      return;
+   }
+
+   {
+      PlaybackCheckpoint *cp = &s_rc_checkpoints[target];
+      retro_ctx_serialize_info_t info;
+      info.data_const = cp->data;
+      info.data       = NULL;
+      info.size       = cp->size;
+      if (!core_unserialize(&info))
+         return;
+      kailleraRetryConnectSeekLocal(cp->frame_index);
+      kailleraRetryConnectUploadState(cp->data, (int)cp->size);
+      s_rc_last_checkpoint_frame = cp->frame_index; /* periodic capture spacing resumes from here */
+   }
+}
+
 /* On-screen mouse-clickable control toolbar for solo "Reproducao de Replay" -
    a small always-on-top window (owned by the main RetroArch window, not a
    true child, so it survives the game window resizing/moving and follows
@@ -863,6 +1152,29 @@ static void PlaybackTogglePause(void) {
    }
 }
 
+/* Host-only: same effect as the native Pause hotkey's retry-connect branch
+   (runloop.c) - factored out here so the toolbar's Pause button can share it
+   without duplicating the stop-FF + pause + broadcast sequence. */
+static void RetryConnectTogglePause(void) {
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   if (!kailleraRetryConnectCanControl())
+      return;
+   if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+      command_event(CMD_EVENT_UNPAUSE, NULL);
+   else {
+      PlaybackSetFastForward(false); /* wouldn't make sense to still be fast-forwarding once paused */
+      command_event(CMD_EVENT_PAUSE, NULL);
+      kailleraRetryConnectCaptureAndSendState();
+   }
+}
+
+/* Forward declarations - both defined further below, once s_rc_seq exists.
+   Let the toolbar (defined here, well before that point in the file) start/
+   check the go-live hand-off without moving that whole state machine up
+   here. */
+static void RetryConnectRequestGoLive(void);
+static bool RetryConnectSelectReady(void);
+
 static void PlaybackToolbarButtonRect(int index, RECT *out) {
    out->left = PB_TOOLBAR_PAD + index * (PB_TOOLBAR_BTN_W + PB_TOOLBAR_PAD);
    out->top = PB_TOOLBAR_PROGRESS_H + PB_TOOLBAR_PAD * 2;
@@ -889,7 +1201,11 @@ static const char *PlaybackToolbarButtonTooltip(int index) {
    case PB_BTN_HOLDFF:   return "Avancar rapido - segure (L)";
    case PB_BTN_TOGGLEFF: return "Alternar velocidade do avanco rapido (Espaco)";
    case PB_BTN_STOP:     return "Parar a reproducao (Esc)";
-   case PB_BTN_GOLIVE:   return "Ir direto para o Ao Vivo!";
+   /* Shared with retry-connect's "Selecionar" (Enter, host-only, so re-uses
+      the same physical toolbar window/slot) - text baked in once at toolbar
+      creation (PlaybackToolbarCreateTooltip()), so it has to read sensibly
+      in both contexts rather than being refreshed per-mode. */
+   case PB_BTN_GOLIVE:   return "Ir ao vivo! / Selecionar (Enter)";
    default: return "";
    }
 }
@@ -948,6 +1264,14 @@ static void PlaybackToolbarPaint(HWND hwnd) {
    bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
    bool ff_on  = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
    bool golive_enabled = GoLiveEnabled();
+   /* retry-connect re-uses this same toolbar window - see PB_BTN_GOLIVE's
+      case below and RetryConnectRequestRewind()/TogglePause()/RequestGoLive()
+      above. Only the host navigates (everyone else's view is authoritatively
+      overwritten by the host's next broadcast anyway), so a peer sees every
+      button greyed out here. */
+   bool rc_mode = kailleraRetryConnectActive();
+   bool rc_can_control = rc_mode && kailleraRetryConnectCanControl();
+   bool rc_select_enabled = rc_can_control && paused && RetryConnectSelectReady();
 
    dc = BeginPaint(hwnd, &ps);
    bg = CreateSolidBrush(RGB(24, 24, 24));
@@ -959,8 +1283,16 @@ static void PlaybackToolbarPaint(HWND hwnd) {
       RECT r;
       HBRUSH btn_bg, icon_brush;
       bool is_down = (i == PB_BTN_HOLDFF && s_pb_toolbar_holdff_down);
-      bool is_disabled = (i == PB_BTN_GOLIVE && !golive_enabled);
+      bool is_disabled;
       int cx, cy;
+
+      if (rc_mode) {
+         is_disabled = (i == PB_BTN_STOP) ? true /* no wired action during retry-connect */
+                     : (i == PB_BTN_GOLIVE) ? !rc_select_enabled
+                     : !rc_can_control;
+      } else {
+         is_disabled = (i == PB_BTN_GOLIVE && !golive_enabled);
+      }
 
       PlaybackToolbarButtonRect(i, &r);
       btn_bg = CreateSolidBrush(is_down ? RGB(90, 90, 20) : (i == s_pb_toolbar_hover && !is_disabled ? RGB(70, 70, 70) : RGB(50, 50, 50)));
@@ -1020,8 +1352,8 @@ static void PlaybackToolbarPaint(HWND hwnd) {
    {
       RECT pr;
       HBRUSH track, fill;
-      int frame_index = kailleraPlaybackGetFrameIndex();
-      int total = kailleraPlaybackGetTotalFrames();
+      int frame_index = rc_mode ? kailleraRetryConnectGetFrameIndex() : kailleraPlaybackGetFrameIndex();
+      int total = rc_mode ? kailleraRetryConnectGetTotalFrames() : kailleraPlaybackGetTotalFrames();
 
       PlaybackToolbarProgressRect(&pr);
       track = CreateSolidBrush(RGB(60, 60, 60));
@@ -1066,7 +1398,32 @@ static LRESULT CALLBACK PlaybackToolbarWndProc(HWND hwnd, UINT msg, WPARAM wp, L
    case WM_LBUTTONDOWN:
       {
          int idx = PlaybackToolbarHitTest((short)LOWORD(lp), (short)HIWORD(lp));
-         if (idx == PB_BTN_REWIND)
+         bool rc_mode = kailleraRetryConnectActive();
+
+         if (rc_mode) {
+            /* Only the host navigates - a peer's click on any of these
+               (already shown greyed out, PlaybackToolbarPaint()) does
+               nothing, same as its keyboard equivalents being ignored. */
+            bool rc_can_control = kailleraRetryConnectCanControl();
+            if (idx == PB_BTN_REWIND) {
+               if (rc_can_control) RetryConnectRequestRewind();
+            } else if (idx == PB_BTN_PAUSE) {
+               if (rc_can_control) RetryConnectTogglePause();
+            } else if (idx == PB_BTN_HOLDFF) {
+               if (rc_can_control) {
+                  s_pb_toolbar_holdff_down = true;
+                  SetCapture(hwnd);
+                  PlaybackSetFastForward(true);
+               }
+            } else if (idx == PB_BTN_TOGGLEFF) {
+               if (rc_can_control) {
+                  runloop_state_t *runloop_st = runloop_state_get_ptr();
+                  PlaybackSetFastForward(!(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION));
+               }
+            } else if (idx == PB_BTN_GOLIVE) {
+               if (rc_can_control) RetryConnectRequestGoLive();
+            }
+         } else if (idx == PB_BTN_REWIND)
             kailleraPlaybackRequestRewind();
          else if (idx == PB_BTN_PAUSE)
             PlaybackTogglePause();
@@ -1658,6 +2015,25 @@ void kailleraRetryConnectFrameTick() {
 #endif
 }
 
+/* Host-only, only while genuinely paused and no hand-off already in
+   progress - starts the multi-stage go-live sequence (see the big comment
+   above ApplyRetryConnectStateReady()). Shared by the raw Enter-key poll
+   below and the toolbar's "Selecionar" button, so both trigger the exact
+   same sequence instead of two independent copies of this 3-line dance. */
+static void RetryConnectRequestGoLive(void) {
+   if (!kailleraRetryConnectCanControl() || s_rc_seq != RC_SEQ_NONE)
+      return;
+   s_rc_seq = RC_SEQ_HOST_PRE_GO_LIVE;
+   s_rc_seq_deadline = GetTickCount() + RETRYCONNECT_PRE_GO_LIVE_MS;
+   if (s_rc_seq_deadline == 0)
+      s_rc_seq_deadline = 1;
+}
+
+/* See the forward declaration next to the toolbar code above. */
+static bool RetryConnectSelectReady(void) {
+   return s_rc_seq == RC_SEQ_NONE;
+}
+
 void kailleraRetryConnectPauseTick() {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
@@ -1673,19 +2049,11 @@ void kailleraRetryConnectPauseTick() {
    /* Enter (commit to this point) - host only, only while actually paused
       (this function only runs from RUNLOOP_STATE_PAUSE, so we know we are).
       No native RetroArch hotkey exists for this, so it's a direct key check
-      here rather than going through the input-remapping/hotkey system.
-      Starts the multi-stage hand-off sequence (see the big comment above
-      ApplyRetryConnectStateReady()) rather than doing anything immediately. */
-   if (kailleraRetryConnectCanControl() && s_rc_seq == RC_SEQ_NONE) {
-      enter_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000) ? true : false;
-      if (enter_pressed && !old_enter_pressed) {
-         s_rc_seq = RC_SEQ_HOST_PRE_GO_LIVE;
-         s_rc_seq_deadline = GetTickCount() + RETRYCONNECT_PRE_GO_LIVE_MS;
-         if (s_rc_seq_deadline == 0)
-            s_rc_seq_deadline = 1;
-      }
-      old_enter_pressed = enter_pressed;
-   }
+      here rather than going through the input-remapping/hotkey system. */
+   enter_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000) ? true : false;
+   if (enter_pressed && !old_enter_pressed)
+      RetryConnectRequestGoLive();
+   old_enter_pressed = enter_pressed;
 
    TickRetryConnectSequence();
 
@@ -1697,6 +2065,57 @@ void kailleraRetryConnectPauseTick() {
    frame_index = 0;
    while (kailleraRetryConnectPollF(&action, &frame_index))
       DispatchRetryConnectAction(action);
+#endif
+}
+
+/* Shows/positions/repaints the shared toolbar (see PlaybackToolbarPaint()'s
+   rc_mode branch) for retry-connect and captures the host's periodic
+   rewind checkpoints - the retry-connect counterpart to
+   kailleraPlaybackRewindTick(), called from the exact same two call sites
+   (runloop.c, both while paused and during normal core_run() frames) since
+   the toolbar needs to stay usable in either state, same as solo Playback's.
+   Only ever calls PlaybackToolbarSetVisible() for its OWN transitions
+   (entering or leaving retry-connect) - NOT unconditionally on every "not
+   active" tick, since that would stomp the SAME call
+   kailleraPlaybackRewindTick() just made a moment earlier for solo Playback/
+   Watch Live (both "not retry-connect" too, but very much still meant to
+   show the toolbar) - this actually happened once already (Watch Live's
+   toolbar going invisible the moment this function shipped), hence the
+   explicit transition-only guard rather than the more obvious-looking
+   unconditional call. No-op outside retry-connect. */
+void kailleraRetryConnectToolbarTick(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   static bool was_active = false;
+   bool now_active = kailleraRetryConnectActive();
+   bool can_control = now_active && kailleraRetryConnectCanControl();
+
+   if (now_active != was_active) {
+      /* New session (or the previous one just ended) - old checkpoints
+         point at a different replay file entirely, same reasoning as
+         PlaybackRewindReset()'s own call site. */
+      RetryConnectCheckpointReset();
+      if (!now_active)
+         PlaybackToolbarSetVisible(false); /* we were the one showing it - hide it on our way out */
+   }
+   was_active = now_active;
+
+   if (!now_active)
+      return;
+
+   PlaybackToolbarSetVisible(GetForegroundWindow() == win32_get_window());
+
+   PlaybackToolbarPosition(s_pb_toolbar);
+   if (s_pb_toolbar)
+      InvalidateRect(s_pb_toolbar, NULL, FALSE); /* Pause/FF/progress reflect live state, which can change from the keyboard too */
+
+   if (can_control) {
+      runloop_state_t *runloop_st = runloop_state_get_ptr();
+      bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
+      if (!paused)
+         RetryConnectCheckpointMaybeCapture(kailleraRetryConnectGetFrameIndex());
+   }
 #endif
 }
 

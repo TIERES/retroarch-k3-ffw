@@ -40,6 +40,19 @@ extern "C" {
     void (WINAPI *clientDroppedCallback)(char *nick, int playernb);
 
     void (WINAPI *moreInfosCallback)(char *gamename);
+
+    /* Not part of the upstream 0.84 API - retroarch-k3-ffw addition. Called
+       when the DLL's own plain-string match against `gameList` failed for
+       a room the user is trying to join: tries to locate the wanted ROM by
+       searching folders already in the user's content history, falling
+       back to a native file-pick dialog. Returns 1 if a match was
+       found/picked (join may proceed), 0 if the user cancelled the picker
+       (caller should show its own "not in your list" error). Must stay
+       last in this struct and be added in the SAME position to
+       kaillera-client's own copy of this struct (kailleraclient.h there) -
+       there is no shared/versioned header between the two repos, this is
+       the actual cross-DLL ABI. */
+    int (WINAPI *findOrBrowseGameCallback)(char *wantedGame);
   } kailleraInfos;
 
   /*

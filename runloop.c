@@ -7127,6 +7127,7 @@ int runloop_iterate(void)
                e.g. stepping back several checkpoints in a row without
                resuming in between. */
             kailleraPlaybackRewindTick();
+            kailleraRetryConnectToolbarTick();
          }
          video_driver_cached_frame();
          return 1;
@@ -8054,6 +8055,7 @@ void core_run(void)
          kailleraPlaybackRewindTick()'s own doc comment. No-op outside solo
          "Reproducao de Replay". */
       kailleraPlaybackRewindTick();
+      kailleraRetryConnectToolbarTick();
 
       if (kailleraCommands) {
 #ifdef KAILLERA_DEFAULT

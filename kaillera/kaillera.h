@@ -176,6 +176,16 @@ int kailleraRetryConnectDownloadState(void* outBuffer, int bufferCap, int* outFr
    that specific mode. See kaillera.c for the actual checkpoint ring buffer. */
 void kailleraPlaybackRewindTick();
 
+/* Retry-connect's counterpart to kailleraPlaybackRewindTick() above - shows
+   the same shared toolbar (Rebobinar/Pausar/Avancar segure/Avancar 10x-1x/
+   Selecionar) during an active group replay instead of solo Playback/Watch
+   Live, host-only-gated (only the host navigates - see
+   kailleraRetryConnectCanControl()). Call from the exact same two call
+   sites as kailleraPlaybackRewindTick() (both are no-ops outside their own
+   mode, so calling both unconditionally every tick is fine - they're
+   mutually exclusive). */
+void kailleraRetryConnectToolbarTick();
+
 /* "Ir direto para o Ao Vivo!" - host-only, call once per kailleraNetplay
    frame (runloop.c's core_run(), same call site as
    kailleraRetryConnectFrameTick() above). Checks (self-rate-limited on the
