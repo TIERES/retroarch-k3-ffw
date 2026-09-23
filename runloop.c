@@ -8042,6 +8042,14 @@ void core_run(void)
          pause hotkey block above). Harmless/a no-op outside retry-connect. */
       kailleraRetryConnectFrameTick();
 
+      /* "Ir direto para o Ao Vivo!" - host-side half: services a spectator's
+         pending state request, if any (self-rate-limited on the
+         kaillera-client side, and a no-op unless actually hosting with
+         streaming enabled - see kailleraWatchServiceStateRequest()'s own
+         comment). Same reasoning as the retry-connect ticks above for why
+         this is safe to call unconditionally every kailleraNetplay frame. */
+      kailleraWatchServiceStateRequest();
+
       /* Playback rewind (Left arrow) + periodic checkpoint capture - see
          kailleraPlaybackRewindTick()'s own doc comment. No-op outside solo
          "Reproducao de Replay". */

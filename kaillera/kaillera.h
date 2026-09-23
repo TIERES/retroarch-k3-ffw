@@ -176,6 +176,15 @@ int kailleraRetryConnectDownloadState(void* outBuffer, int bufferCap, int* outFr
    that specific mode. See kaillera.c for the actual checkpoint ring buffer. */
 void kailleraPlaybackRewindTick();
 
+/* "Ir direto para o Ao Vivo!" - host-only, call once per kailleraNetplay
+   frame (runloop.c's core_run(), same call site as
+   kailleraRetryConnectFrameTick() above). Checks (self-rate-limited on the
+   kaillera-client side, so cheap to call every frame) whether a spectator
+   asked for a fresh sync point and, if so, takes a core_serialize() - no
+   need to pause, this host is playing live - and uploads it. No-op unless
+   actually hosting with "Stream ao vivo!" enabled. */
+void kailleraWatchServiceStateRequest();
+
 extern volatile int kailleraInitialisedInternal;
 extern int kNumPlayers;
 extern int kPlayerNumber;

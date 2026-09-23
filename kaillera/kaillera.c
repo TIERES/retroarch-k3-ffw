@@ -342,6 +342,16 @@ void (WINAPI* kailleraPlaybackSeekToFrameF)(int frame);
 int (WINAPI* kailleraPlaybackGetTotalFramesF)();
 void (WINAPI* kailleraPlaybackStopF)();
 
+/* "Ir direto para o Ao Vivo!" (Watch Live toolbar) - optional, same
+   convention. Spectator-side (kailleraWatch*) and host-side
+   (kailleraStream*) - see kaillera.h. */
+int (WINAPI* kailleraWatchRequestStateF)();
+int (WINAPI* kailleraWatchStateReadyF)();
+int (WINAPI* kailleraWatchDownloadStateF)(void* outBuffer, int bufferCap, int* outFrameIndex, int* outByteOffset);
+void (WINAPI* kailleraWatchJumpToLiveF)(int frameIndex, int byteOffset);
+int (WINAPI* kailleraStreamCheckStateRequestedF)();
+void (WINAPI* kailleraStreamUploadStateF)(int frameIndex, const void* data, int size);
+
 
 
 void CloseKaillera() {
@@ -410,6 +420,12 @@ void LoadKaillera() {
       kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "kailleraPlaybackSeekToFrame");
       kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackGetTotalFrames");
       kailleraPlaybackStopF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraPlaybackStop");
+      kailleraWatchRequestStateF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchRequestState");
+      kailleraWatchStateReadyF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchStateReady");
+      kailleraWatchDownloadStateF = (int (WINAPI*)(void*, int, int*, int*)) GetProcAddress(kailleraDLL, "kailleraWatchDownloadState");
+      kailleraWatchJumpToLiveF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraWatchJumpToLive");
+      kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraStreamCheckStateRequested");
+      kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadState");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -430,6 +446,12 @@ void LoadKaillera() {
       kailleraPlaybackSeekToFrameF = (void (WINAPI*)(int)) GetProcAddress(kailleraDLL, "_kailleraPlaybackSeekToFrame@4");
       kailleraPlaybackGetTotalFramesF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackGetTotalFrames@0");
       kailleraPlaybackStopF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraPlaybackStop@0");
+      kailleraWatchRequestStateF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchRequestState@0");
+      kailleraWatchStateReadyF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchStateReady@0");
+      kailleraWatchDownloadStateF = (int (WINAPI*)(void*, int, int*, int*)) GetProcAddress(kailleraDLL, "_kailleraWatchDownloadState@16");
+      kailleraWatchJumpToLiveF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraWatchJumpToLive@8");
+      kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraStreamCheckStateRequested@0");
+      kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadState@12");
 #endif
 
       if (kailleraGetVersionF != NULL &&
@@ -556,6 +578,83 @@ static void kailleraPlaybackStop(void) {
       command_event(CMD_EVENT_UNPAUSE, NULL); /* unpause first - stopping while paused left things in a bad state */
    if (kailleraPlaybackStopF != NULL)
       kailleraPlaybackStopF();
+#endif
+}
+
+/* "Ir direto para o Ao Vivo!" (Watch Live toolbar) - spectator-side wrappers.
+   See kaillera.h's own doc comments and PB_BTN_GOLIVE below for how these
+   three get used together. */
+static int kailleraWatchRequestState(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return 0;
+#else
+   return (kailleraWatchRequestStateF != NULL) && (kailleraWatchRequestStateF() != 0);
+#endif
+}
+static int kailleraWatchStateReady(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return 0;
+#else
+   return (kailleraWatchStateReadyF != NULL) && (kailleraWatchStateReadyF() != 0);
+#endif
+}
+static int kailleraWatchDownloadState(void* outBuffer, int bufferCap, int* outFrameIndex, int* outByteOffset) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)outBuffer; (void)bufferCap; (void)outFrameIndex; (void)outByteOffset;
+   return -1;
+#else
+   if (kailleraWatchDownloadStateF == NULL)
+      return -1;
+   return kailleraWatchDownloadStateF(outBuffer, bufferCap, outFrameIndex, outByteOffset);
+#endif
+}
+static void kailleraWatchJumpToLive(int frameIndex, int byteOffset) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   (void)frameIndex; (void)byteOffset;
+#else
+   if (kailleraWatchJumpToLiveF != NULL)
+      kailleraWatchJumpToLiveF(frameIndex, byteOffset);
+#endif
+}
+
+/* "Ir direto para o Ao Vivo!" - host-side half, called from
+   kailleraRetryConnectFrameTick()'s call site in runloop.c every
+   kailleraNetplay frame (cheap/no-op unless actually streaming - see
+   n02_stream_check_state_requested()'s own self-rate-limiting on the
+   kaillera-client side). Captures a state and uploads it the moment a
+   spectator's request is seen - no pause needed, this host is playing live,
+   not idle (unlike retry-connect's kailleraRetryConnectCaptureAndSendState(),
+   which this otherwise mirrors closely). */
+void kailleraWatchServiceStateRequest(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   size_t state_size;
+   void  *state_buf;
+
+   if (kailleraStreamCheckStateRequestedF == NULL || kailleraStreamCheckStateRequestedF() == 0)
+      return;
+
+   state_size = core_serialize_size();
+   state_buf  = state_size ? malloc(state_size) : NULL;
+   if (state_buf == NULL)
+      return;
+
+   {
+      retro_ctx_serialize_info_t info;
+      info.data       = state_buf;
+      info.data_const = NULL;
+      info.size       = state_size;
+      if (core_serialize(&info) && kailleraStreamUploadStateF != NULL) {
+         /* current_core_frame (kaillera.h) is already ticking for any
+            kailleraNetplay session (runloop.c's core_run()), not just
+            retry-connect - and the value only needs to be locally
+            meaningful on the receiving end anyway (see
+            n02_stream_upload_state()'s own doc comment). */
+         kailleraStreamUploadStateF((int)current_core_frame, state_buf, (int)state_size);
+      }
+   }
+   free(state_buf);
 #endif
 }
 
@@ -697,7 +796,7 @@ static void PlaybackRewindMaybeCapture(int frame_index, bool force) {
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
 
 #define PB_TOOLBAR_CLASS "N02PlaybackToolbar"
-#define PB_TOOLBAR_BTN_COUNT 5
+#define PB_TOOLBAR_BTN_COUNT 6
 #define PB_TOOLBAR_BTN_W 52
 #define PB_TOOLBAR_BTN_H 42
 #define PB_TOOLBAR_PAD 4
@@ -706,12 +805,26 @@ static void PlaybackRewindMaybeCapture(int frame_index, bool force) {
 #define PB_TOOLBAR_H (PB_TOOLBAR_PROGRESS_H + PB_TOOLBAR_PAD + PB_TOOLBAR_BTN_H + PB_TOOLBAR_PAD * 2)
 #define PB_TOOLBAR_ALPHA 210 /* out of 255 - "certa transparencia" over the game view */
 
-enum { PB_BTN_REWIND = 0, PB_BTN_PAUSE, PB_BTN_HOLDFF, PB_BTN_TOGGLEFF, PB_BTN_STOP };
+enum { PB_BTN_REWIND = 0, PB_BTN_PAUSE, PB_BTN_HOLDFF, PB_BTN_TOGGLEFF, PB_BTN_STOP, PB_BTN_GOLIVE };
 
 static HWND s_pb_toolbar = NULL;
 static HWND s_pb_tooltip = NULL;
 static int  s_pb_toolbar_hover = -1;
 static bool s_pb_toolbar_holdff_down = false;
+
+/* "Ir direto para o Ao Vivo!" (PB_BTN_GOLIVE) - Watch Live only (see
+   kailleraPlaybackRewindTick()'s is_static_playback check, which now also
+   covers Watch Live - true whenever kailleraPlaybackGetTotalFrames() <= 0,
+   i.e. no fixed total, unlike static local-file Playback). Starts
+   "at the live edge" (disabled); Rewind or pausing the recorded stream
+   means we've fallen behind, so re-enable it - see
+   PlaybackTogglePause()/kailleraPlaybackRequestRewind()'s call sites below. */
+static bool s_watch_behind_live = false;
+static bool s_watch_golive_pending = false; /* request sent, waiting on the host */
+static DWORD s_watch_golive_last_poll = 0;
+static DWORD s_watch_golive_deadline = 0;
+#define WATCH_GOLIVE_POLL_INTERVAL_MS 1000
+#define WATCH_GOLIVE_TIMEOUT_MS 15000 /* host polls every ~3s (n02_stream.cpp) - well clear of that */
 
 /* Mirrors the FASTMOTION hotkey block's own on/off transitions exactly
    (runloop.c, "Check fastmotion hotkeys") - shared by both FF toolbar
@@ -776,6 +889,7 @@ static const char *PlaybackToolbarButtonTooltip(int index) {
    case PB_BTN_HOLDFF:   return "Avancar rapido - segure (L)";
    case PB_BTN_TOGGLEFF: return "Alternar velocidade do avanco rapido (Espaco)";
    case PB_BTN_STOP:     return "Parar a reproducao (Esc)";
+   case PB_BTN_GOLIVE:   return "Ir direto para o Ao Vivo!";
    default: return "";
    }
 }
@@ -813,6 +927,17 @@ static void PlaybackDrawBar(HDC dc, int cx, int cy, int w, int h, HBRUSH brush) 
    FillRect(dc, &r, brush);
 }
 
+/* Watch Live only (see PB_BTN_GOLIVE's own comment above) - solo Playback
+   has no live edge to jump to, so the button stays permanently disabled
+   there regardless of s_watch_behind_live. */
+static bool IsWatchLive(void) {
+   return kailleraPlaybackGetFrameIndex() >= 0 && kailleraPlaybackGetTotalFrames() <= 0;
+}
+
+static bool GoLiveEnabled(void) {
+   return IsWatchLive() && s_watch_behind_live && !s_watch_golive_pending;
+}
+
 static void PlaybackToolbarPaint(HWND hwnd) {
    PAINTSTRUCT ps;
    HDC dc;
@@ -822,6 +947,7 @@ static void PlaybackToolbarPaint(HWND hwnd) {
    runloop_state_t *runloop_st = runloop_state_get_ptr();
    bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
    bool ff_on  = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
+   bool golive_enabled = GoLiveEnabled();
 
    dc = BeginPaint(hwnd, &ps);
    bg = CreateSolidBrush(RGB(24, 24, 24));
@@ -833,17 +959,18 @@ static void PlaybackToolbarPaint(HWND hwnd) {
       RECT r;
       HBRUSH btn_bg, icon_brush;
       bool is_down = (i == PB_BTN_HOLDFF && s_pb_toolbar_holdff_down);
+      bool is_disabled = (i == PB_BTN_GOLIVE && !golive_enabled);
       int cx, cy;
 
       PlaybackToolbarButtonRect(i, &r);
-      btn_bg = CreateSolidBrush(is_down ? RGB(90, 90, 20) : (i == s_pb_toolbar_hover ? RGB(70, 70, 70) : RGB(50, 50, 50)));
+      btn_bg = CreateSolidBrush(is_down ? RGB(90, 90, 20) : (i == s_pb_toolbar_hover && !is_disabled ? RGB(70, 70, 70) : RGB(50, 50, 50)));
       FillRect(dc, &r, btn_bg);
       DeleteObject(btn_bg);
       FrameRect(dc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
 
       cx = (r.left + r.right) / 2;
       cy = (r.top + r.bottom) / 2;
-      icon_brush = CreateSolidBrush(RGB(240, 240, 240));
+      icon_brush = CreateSolidBrush(is_disabled ? RGB(110, 110, 110) : RGB(240, 240, 240));
 
       switch (i) {
       case PB_BTN_REWIND:
@@ -875,6 +1002,13 @@ static void PlaybackToolbarPaint(HWND hwnd) {
          break;
       case PB_BTN_STOP:
          PlaybackDrawBar(dc, cx, cy, 16, 16, icon_brush);
+         break;
+      case PB_BTN_GOLIVE:
+         /* skip-to-end (bar + arrow) - "waiting on the host" state is
+            already conveyed by the disabled greying above, kept simple
+            rather than animating anything here. */
+         PlaybackDrawTriangleRight(dc, cx - 6, cy, 14, icon_brush);
+         PlaybackDrawBar(dc, cx + 7, cy, 4, 18, icon_brush);
          break;
       }
       DeleteObject(icon_brush);
@@ -945,6 +1079,15 @@ static LRESULT CALLBACK PlaybackToolbarWndProc(HWND hwnd, UINT msg, WPARAM wp, L
             PlaybackSetFastForward(!(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION));
          } else if (idx == PB_BTN_STOP) {
             kailleraPlaybackStop();
+         } else if (idx == PB_BTN_GOLIVE && GoLiveEnabled()) {
+            if (kailleraWatchRequestState()) {
+               s_watch_golive_pending = true;
+               s_watch_golive_last_poll = GetTickCount();
+               s_watch_golive_deadline = GetTickCount() + WATCH_GOLIVE_TIMEOUT_MS;
+               if (s_watch_golive_deadline == 0) s_watch_golive_deadline = 1;
+            } else {
+               runloop_msg_queue_push("Nao foi possivel pedir o sync ao vivo agora - tente de novo em instantes.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+            }
          }
          InvalidateRect(hwnd, NULL, FALSE);
       }
@@ -1093,6 +1236,22 @@ void kailleraPlaybackRewindTick(void) {
    if (is_static_playback != was_static_playback)
       PlaybackRewindReset();
    was_static_playback = is_static_playback;
+
+   /* "Ir direto para o Ao Vivo!" - a fresh pause (any trigger: the toolbar's
+      own Pause button, or the "P" hotkey, which doesn't funnel through
+      PlaybackTogglePause() at all) means we've fallen behind the live edge -
+      catches both input paths uniformly instead of hooking each one. No-op
+      outside Watch Live in practice (see PB_BTN_GOLIVE's enabled-state check
+      below, which also gates on kailleraPlaybackGetTotalFrames() <= 0 - solo
+      Playback pausing sets this flag too, harmlessly, since the button stays
+      disabled there regardless). */
+   {
+      static bool old_paused_for_golive = false;
+      bool now_paused = (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
+      if (is_static_playback && now_paused && !old_paused_for_golive)
+         s_watch_behind_live = true;
+      old_paused_for_golive = now_paused;
+   }
    /* WS_EX_TOPMOST floats the toolbar above EVERY window, not just
       RetroArch's - only actually show it while the game window is the
       foreground one, so alt-tabbing away doesn't leave it plastered over
@@ -1166,6 +1325,7 @@ void kailleraPlaybackRewindTick(void) {
          info.size       = cp->size;
          core_unserialize(&info);
          kailleraPlaybackSeekToFrame(cp->frame_index);
+         s_watch_behind_live = true; /* no-op outside Watch Live - see PB_BTN_GOLIVE's own comment above */
          /* Deliberately doesn't touch pause state either way - keeps
             playing right on if it was already running (no need to hit
             Resume after every rewind tap), and stays put if the user had
@@ -1176,6 +1336,43 @@ void kailleraPlaybackRewindTick(void) {
             s_pb_rewind_gesture_until = 1;
       } else {
          runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      }
+   }
+
+   /* "Ir direto para o Ao Vivo!" - poll for the host's response after a
+      PB_BTN_GOLIVE click (see the toolbar's WM_LBUTTONDOWN handler above).
+      Bounded by WATCH_GOLIVE_TIMEOUT_MS in case the host is running an
+      older DLL/build that never services the request at all - the button
+      just re-arms afterward so the user can try again. */
+   if (s_watch_golive_pending) {
+      if ((LONG)(now - s_watch_golive_deadline) >= 0) {
+         s_watch_golive_pending = false;
+         runloop_msg_queue_push("O host nao respondeu ao pedido de sync ao vivo.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+      } else if (now - s_watch_golive_last_poll >= WATCH_GOLIVE_POLL_INTERVAL_MS) {
+         s_watch_golive_last_poll = now;
+         if (kailleraWatchStateReady()) {
+            size_t state_size = core_serialize_size();
+            void  *state_buf  = state_size ? malloc(state_size) : NULL;
+
+            s_watch_golive_pending = false;
+            if (state_buf != NULL) {
+               int frame_index_dl = 0, byte_offset = 0;
+               int n = kailleraWatchDownloadState(state_buf, (int)state_size, &frame_index_dl, &byte_offset);
+               if (n > 0 && (size_t)n == state_size) {
+                  retro_ctx_serialize_info_t info;
+                  info.data_const = state_buf;
+                  info.data       = NULL;
+                  info.size       = (size_t)n;
+                  core_unserialize(&info);
+                  kailleraWatchJumpToLive(frame_index_dl, byte_offset);
+                  s_watch_behind_live = false;
+                  PlaybackRewindReset(); /* old checkpoints point into the buffer we just discarded (player_watch_jump_to_live()) - stale */
+               } else {
+                  runloop_msg_queue_push("Falha ao baixar o sync ao vivo do host.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+               }
+               free(state_buf);
+            }
+         }
       }
    }
 #endif
