@@ -6240,6 +6240,19 @@ static enum runloop_state_enum runloop_check_state(
    if (pause_nonactive)
       focused                = is_focused;
 
+   /* A Kaillera session (retry-connect included) needs its connection
+      serviced continuously regardless of window focus - core_run() is where
+      that servicing happens (kailleraSyncData()/kailleraRetryConnectFrameTick(),
+      both called from there), and "not focused" below skips calling it
+      entirely. Without this, alt-tabbing away (or, in a same-machine 2-window
+      test, simply clicking the other player's window) leaves this client's
+      Kaillera connection completely unserviced - incoming messages queue up
+      instead of being processed, surfacing as anything from a stuck replay to
+      the other player's client hanging waiting on data that never arrives.
+      Mirrors the same override already applied for the menu's own focus
+      check above (kailleraNetplay ? focused = true). */
+   if (kailleraNetplay) focused = true;
+
    /* Check pause hotkey */
    if (!kailleraNetplay)
    {
@@ -6333,6 +6346,86 @@ static enum runloop_state_enum runloop_check_state(
             runloop_paused = false;
       }
    }
+   else if (kailleraRetryConnectCanControl())
+   {
+      /* retry-connect: host-only native Pause/Resume during a group replay,
+         reusing whatever key the user already has RARCH_PAUSE_TOGGLE bound to
+         (usually P) so muscle memory still works - see kaillera.h. Calls
+         CMD_EVENT_PAUSE/CMD_EVENT_UNPAUSE directly instead of
+         CMD_EVENT_PAUSE_TOGGLE, since that command's handler still
+         unconditionally blocks during any Kaillera session (retroarch.c) and
+         this avoids touching that gate at all. Enter (go live, only once
+         paused) is handled separately, from RUNLOOP_STATE_PAUSE below -
+         see kailleraRetryConnectPauseTick(). */
+      static bool old_pause_pressed = false;
+      bool pause_pressed = BIT256_GET(current_bits, RARCH_PAUSE_TOGGLE);
+
+      if (pause_pressed && !old_pause_pressed)
+      {
+         /* retry-connect: Resume here is purely local - the peer only ever
+            reacts to a freshly-sent state (below), never to a bare RESUME,
+            so resuming to scrub forward doesn't need to touch the network
+            at all. Pausing, on the other hand, immediately hands a fresh
+            savestate to every peer (see kailleraRetryConnectCaptureAndSendState(),
+            kaillera.c) - the host may pause/resume/re-pause any number of
+            times while searching for the right moment, and each Pause just
+            supersedes whichever state the peer last loaded. The actual
+            control hand-off (on-screen countdown, releasing input) only
+            happens once the host commits with Enter while paused - see
+            kailleraRetryConnectPauseTick(). */
+         if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+            command_event(CMD_EVENT_UNPAUSE, NULL);
+         else
+         {
+            /* Stop fast-forward first - it wouldn't make sense to still be
+               fast-forwarding once paused. */
+            if (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+            {
+               input_st->flags &= ~INP_FLAG_NONBLOCKING;
+               runloop_st->flags &= ~RUNLOOP_FLAG_FASTMOTION;
+               runloop_st->fastforward_after_frames = 1;
+               driver_set_nonblock_state();
+               if (settings->bools.frame_time_counter_reset_after_fastforwarding)
+                  video_st->frame_time_count = 0;
+            }
+
+            command_event(CMD_EVENT_PAUSE, NULL);
+            kailleraRetryConnectCaptureAndSendState();
+         }
+      }
+      old_pause_pressed = pause_pressed;
+   }
+   else if (kailleraPlaybackMode && !kailleraRetryConnectActive())
+   {
+      /* Solo "Reproducao de Replay" (static local-file Playback, NOT a
+         retry-connect group replay - that case is handled above) - no peer
+         to keep in sync with, so a bare local pause/resume toggle is all
+         this needs. Rewind (Left arrow) is handled separately, from both
+         here and RUNLOOP_STATE_PAUSE - see kailleraPlaybackRewindTick(). */
+      static bool old_pause_pressed = false;
+      bool pause_pressed = BIT256_GET(current_bits, RARCH_PAUSE_TOGGLE);
+
+      if (pause_pressed && !old_pause_pressed)
+      {
+         if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+            command_event(CMD_EVENT_UNPAUSE, NULL);
+         else
+         {
+            if (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+            {
+               input_st->flags &= ~INP_FLAG_NONBLOCKING;
+               runloop_st->flags &= ~RUNLOOP_FLAG_FASTMOTION;
+               runloop_st->fastforward_after_frames = 1;
+               driver_set_nonblock_state();
+               if (settings->bools.frame_time_counter_reset_after_fastforwarding)
+                  video_st->frame_time_count = 0;
+            }
+
+            command_event(CMD_EVENT_PAUSE, NULL);
+         }
+      }
+      old_pause_pressed = pause_pressed;
+   }
 
    /* Check recording hotkey */
    HOTKEY_CHECK(RARCH_RECORDING_TOGGLE, CMD_EVENT_RECORDING_TOGGLE, true, NULL);
@@ -6409,7 +6502,15 @@ static enum runloop_state_enum runloop_check_state(
        * that the button must go from pressed to unpressed back to pressed
        * to be able to toggle between them.
        */
-      if (!runloop_st->fastmotion_override.current.inhibit_toggle)
+      /* retry-connect: only the host fast-forwards a group replay - a peer's
+         own press must do nothing (see the pause hotkey block above, which
+         is how the host's fast-forward gets handed off to everyone else).
+         Does not affect n02's ordinary standalone Playback/Watch mode, which
+         has no host to defer to and keeps fast-forwarding freely -
+         kailleraRetryConnectActive() is false there even though
+         kailleraPlaybackMode (this block's own gate, above) is true. */
+      if (!runloop_st->fastmotion_override.current.inhibit_toggle
+            && !(kailleraRetryConnectActive() && !kailleraRetryConnectCanControl()))
       {
          static bool old_button_state = false;
          static bool old_hold_button_state = false;
@@ -7014,6 +7115,20 @@ int runloop_iterate(void)
          /* FIXME: This is an ugly way to tell Netplay this... */
          netplay_driver_ctl(RARCH_NETPLAY_CTL_PAUSE, NULL);
 #endif
+         /* retry-connect: core_run() (and with it kailleraSyncData(), which
+            is where the connection normally gets drained) does not run at
+            all while paused - this is the only remaining place a paused
+            client can hear a remote RESUME/GO_LIVE, or notice the host's
+            local Enter press. See kailleraRetryConnectPauseTick(). */
+         if (kailleraNetplay)
+         {
+            kailleraRetryConnectPauseTick();
+            /* Playback rewind (Left arrow) needs to work while paused too -
+               e.g. stepping back several checkpoints in a row without
+               resuming in between. */
+            kailleraPlaybackRewindTick();
+            kailleraRetryConnectToolbarTick();
+         }
          video_driver_cached_frame();
          return 1;
       case RUNLOOP_STATE_END:
@@ -7914,6 +8029,34 @@ void core_run(void)
       current_core_frame++;
       //RARCH_DBG("CF[%i]\n", current_core_frame);
 
+      /* retry-connect: cheap to re-check every frame, and needed here - a
+         group replay can go live (GO_LIVE) mid-match while we're still
+         mid-catch-up (not yet paused), which the pause-only refresh in
+         kailleraRetryConnectPauseTick() would miss entirely. Harmless/a
+         no-op for every other kailleraNetplay case. */
+      kailleraRetryConnectRefreshPlaybackMode();
+
+      /* retry-connect: a peer (not the host) never fast-forwards its own
+         replay, so it just keeps running this loop at its own pace until the
+         host stops fast-forwarding and hands off a state save - this is
+         where that arrives (see kailleraRetryConnectUploadState() and the
+         pause hotkey block above). Harmless/a no-op outside retry-connect. */
+      kailleraRetryConnectFrameTick();
+
+      /* "Ir direto para o Ao Vivo!" - host-side half: services a spectator's
+         pending state request, if any (self-rate-limited on the
+         kaillera-client side, and a no-op unless actually hosting with
+         streaming enabled - see kailleraWatchServiceStateRequest()'s own
+         comment). Same reasoning as the retry-connect ticks above for why
+         this is safe to call unconditionally every kailleraNetplay frame. */
+      kailleraWatchServiceStateRequest();
+
+      /* Playback rewind (Left arrow) + periodic checkpoint capture - see
+         kailleraPlaybackRewindTick()'s own doc comment. No-op outside solo
+         "Reproducao de Replay". */
+      kailleraPlaybackRewindTick();
+      kailleraRetryConnectToolbarTick();
+
       if (kailleraCommands) {
 #ifdef KAILLERA_DEFAULT
          netjoy[0][0] = kailleraCommands;
@@ -7940,6 +8083,24 @@ void core_run(void)
 
       for (int a = 0; a < track_0_port_cntr; a++) {
          input_state_kaillera(0, _trackal_device[a], _trackal_idx[a], _trackal_id[a]);
+      }
+
+      /* retry-connect: for a brief window right after the go-live countdown
+         hands control back, ship neutral (nothing pressed) input instead of
+         whatever this player is actually holding - see
+         kailleraRetryConnectSuppressLocalInput()'s doc comment (kaillera.h).
+         Overrides netjoy[0]/netjoy_ex[0] (this client's own outgoing slot,
+         just filled above) right before it goes out over kailleraSyncData()
+         below - a no-op outside that window/outside retry-connect. */
+      if (kailleraRetryConnectSuppressLocalInput()) {
+#ifdef KAILLERA_DEFAULT
+         netjoy[0][1] = 0;
+#endif
+         netjoy_ex[0][1] = 0;
+         netjoy_ex[0][2] = 0;
+         netjoy_ex[0][3] = 0;
+         netjoy_ex[0][4] = 0;
+         netjoy_ex[0][5] = 0;
       }
 
       //if (!kaillera_buttons_write || current_core_frame <= INIT_FRAMES) {
