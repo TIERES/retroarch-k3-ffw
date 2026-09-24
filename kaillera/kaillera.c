@@ -828,14 +828,69 @@ static void kailleraWatchJumpToLive(int frameIndex, int byteOffset) {
 #endif
 }
 
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+/* "Ir direto para o Ao Vivo!" - frontend-side state that a core savestate
+   doesn't cover but that still decides what the core sees: which recorded
+   input slot feeds each player (players[], rewritten by the "!swap"/"!take"/
+   "!reset" chat commands - see kailleraChatReceivedCallback() and core_run()'s
+   kReceivedCommand handling) plus the swap command's own debounce counter. A
+   spectator replaying from frame 0 rebuilds both by replaying those same
+   commands, but one jumping straight to a host's state skips over them - so
+   the host appends them to the uploaded state and the spectator restores
+   them right after core_unserialize().
+
+   Appended to the state blob rather than sent separately so kaillera-client
+   needs no change for it: an older spectator just gets the blob truncated to
+   its own core_serialize_size() buffer (n02_watch_download_state() copies
+   min(size, capacity)) and never sees the trailer; an older host just sends
+   none. */
+#define WATCH_STATE_TRAILER_MAGIC 0x314D504B /* "KPM1" */
+typedef struct {
+   unsigned magic;
+   int      num_players;
+   int      swap_cntr;
+   int      player_number[MAX_INPUTS];
+} watch_state_trailer_t;
+
+static void WatchStateTrailerFill(void *dst) {
+   watch_state_trailer_t t;
+   int i;
+   memset(&t, 0, sizeof(t));
+   t.magic       = WATCH_STATE_TRAILER_MAGIC;
+   t.num_players = kNumPlayers;
+   t.swap_cntr   = kaillera_swap_cntr;
+   for (i = 0; i < MAX_INPUTS; i++)
+      t.player_number[i] = players[i].playerNumber;
+   memcpy(dst, &t, sizeof(t)); /* dst sits right after the state bytes - not necessarily aligned */
+}
+
+static void WatchStateTrailerApply(const void *src) {
+   watch_state_trailer_t t;
+   int i;
+   memcpy(&t, src, sizeof(t));
+   if (t.magic != WATCH_STATE_TRAILER_MAGIC || t.num_players != kNumPlayers)
+      return;
+   for (i = 0; i < MAX_INPUTS; i++) {
+      if (t.player_number[i] < 0 || t.player_number[i] >= MAX_INPUTS)
+         return; /* corrupt - keep our own mapping rather than index out of netjoy_ex */
+   }
+   for (i = 0; i < MAX_INPUTS; i++)
+      players[i].playerNumber = t.player_number[i];
+   kaillera_swap_cntr = t.swap_cntr;
+}
+#endif
+
 /* "Ir direto para o Ao Vivo!" - host-side half, called from
    kailleraRetryConnectFrameTick()'s call site in runloop.c every
-   kailleraNetplay frame (cheap/no-op unless actually streaming - see
-   n02_stream_check_state_requested()'s own self-rate-limiting on the
-   kaillera-client side). Captures a state and uploads it the moment a
-   spectator's request is seen - no pause needed, this host is playing live,
-   not idle (unlike retry-connect's kailleraRetryConnectCaptureAndSendState(),
-   which this otherwise mirrors closely). */
+   kailleraNetplay frame (cheap - kaillera-client's side never blocks, both
+   the request poll and the upload run on its own background thread).
+   Captures a state the moment a spectator's request is seen - no pause
+   needed, this host is playing live, not idle (unlike retry-connect's
+   kailleraRetryConnectCaptureAndSendState(), which this otherwise mirrors
+   closely). Must stay ahead of this frame's kailleraSyncData() in
+   core_run(): kaillera-client pairs the state with the stream offset of the
+   next input to be pushed, which is only this state's own next input if
+   that one hasn't gone through yet. */
 void kailleraWatchServiceStateRequest(void) {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
@@ -847,7 +902,7 @@ void kailleraWatchServiceStateRequest(void) {
       return;
 
    state_size = core_serialize_size();
-   state_buf  = state_size ? malloc(state_size) : NULL;
+   state_buf  = state_size ? malloc(state_size + sizeof(watch_state_trailer_t)) : NULL;
    if (state_buf == NULL)
       return;
 
@@ -857,12 +912,13 @@ void kailleraWatchServiceStateRequest(void) {
       info.data_const = NULL;
       info.size       = state_size;
       if (core_serialize(&info) && kailleraStreamUploadStateF != NULL) {
+         WatchStateTrailerFill((char*)state_buf + state_size);
          /* current_core_frame (kaillera.h) is already ticking for any
             kailleraNetplay session (runloop.c's core_run()), not just
             retry-connect - and the value only needs to be locally
             meaningful on the receiving end anyway (see
             n02_stream_upload_state()'s own doc comment). */
-         kailleraStreamUploadStateF((int)current_core_frame, state_buf, (int)state_size);
+         kailleraStreamUploadStateF((int)current_core_frame, state_buf, (int)(state_size + sizeof(watch_state_trailer_t)));
       }
    }
    free(state_buf);
@@ -1136,11 +1192,11 @@ static bool s_pb_toolbar_holdff_down = false;
 /* "Ir direto para o Ao Vivo!" (PB_BTN_GOLIVE) - Watch Live only (see
    kailleraPlaybackRewindTick()'s is_static_playback check, which now also
    covers Watch Live - true whenever kailleraPlaybackGetTotalFrames() <= 0,
-   i.e. no fixed total, unlike static local-file Playback). Starts
-   "at the live edge" (disabled); Rewind or pausing the recorded stream
-   means we've fallen behind, so re-enable it - see
-   PlaybackTogglePause()/kailleraPlaybackRequestRewind()'s call sites below. */
-static bool s_watch_behind_live = false;
+   i.e. no fixed total, unlike static local-file Playback). Always enabled
+   there (only greyed out while a request is already in flight) - the
+   spectator may be behind the host even right after "Acompanhar ao vivo!"
+   (the initial catch-up from frame 0 isn't instant), so there's no reliable
+   "already at the live edge" state to disable it on. */
 static bool s_watch_golive_pending = false; /* request sent, waiting on the host */
 static DWORD s_watch_golive_last_poll = 0;
 static DWORD s_watch_golive_deadline = 0;
@@ -1277,13 +1333,13 @@ static void PlaybackDrawBar(HDC dc, int cx, int cy, int w, int h, HBRUSH brush) 
 
 /* Watch Live only (see PB_BTN_GOLIVE's own comment above) - solo Playback
    has no live edge to jump to, so the button stays permanently disabled
-   there regardless of s_watch_behind_live. */
+   there. */
 static bool IsWatchLive(void) {
    return kailleraPlaybackGetFrameIndex() >= 0 && kailleraPlaybackGetTotalFrames() <= 0;
 }
 
 static bool GoLiveEnabled(void) {
-   return IsWatchLive() && s_watch_behind_live && !s_watch_golive_pending;
+   return IsWatchLive() && !s_watch_golive_pending;
 }
 
 static void PlaybackToolbarPaint(HWND hwnd) {
@@ -1626,21 +1682,6 @@ void kailleraPlaybackRewindTick(void) {
       PlaybackRewindReset();
    was_static_playback = is_static_playback;
 
-   /* "Ir direto para o Ao Vivo!" - a fresh pause (any trigger: the toolbar's
-      own Pause button, or the "P" hotkey, which doesn't funnel through
-      PlaybackTogglePause() at all) means we've fallen behind the live edge -
-      catches both input paths uniformly instead of hooking each one. No-op
-      outside Watch Live in practice (see PB_BTN_GOLIVE's enabled-state check
-      below, which also gates on kailleraPlaybackGetTotalFrames() <= 0 - solo
-      Playback pausing sets this flag too, harmlessly, since the button stays
-      disabled there regardless). */
-   {
-      static bool old_paused_for_golive = false;
-      bool now_paused = (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
-      if (is_static_playback && now_paused && !old_paused_for_golive)
-         s_watch_behind_live = true;
-      old_paused_for_golive = now_paused;
-   }
    /* WS_EX_TOPMOST floats the toolbar above EVERY window, not just
       RetroArch's - only actually show it while the game window is the
       foreground one, so alt-tabbing away doesn't leave it plastered over
@@ -1714,7 +1755,6 @@ void kailleraPlaybackRewindTick(void) {
          info.size       = cp->size;
          core_unserialize(&info);
          kailleraPlaybackSeekToFrame(cp->frame_index);
-         s_watch_behind_live = true; /* no-op outside Watch Live - see PB_BTN_GOLIVE's own comment above */
          /* Deliberately doesn't touch pause state either way - keeps
             playing right on if it was already running (no need to hit
             Resume after every rewind tap), and stays put if the user had
@@ -1741,21 +1781,32 @@ void kailleraPlaybackRewindTick(void) {
          s_watch_golive_last_poll = now;
          if (kailleraWatchStateReady()) {
             size_t state_size = core_serialize_size();
-            void  *state_buf  = state_size ? malloc(state_size) : NULL;
+            size_t blob_cap   = state_size + sizeof(watch_state_trailer_t);
+            void  *state_buf  = state_size ? malloc(blob_cap) : NULL;
 
             s_watch_golive_pending = false;
             if (state_buf != NULL) {
                int frame_index_dl = 0, byte_offset = 0;
-               int n = kailleraWatchDownloadState(state_buf, (int)state_size, &frame_index_dl, &byte_offset);
-               if (n > 0 && (size_t)n == state_size) {
+               int n = kailleraWatchDownloadState(state_buf, (int)blob_cap, &frame_index_dl, &byte_offset);
+               /* state_size alone = a host build older than
+                  watch_state_trailer_t (see its own comment) */
+               if (n > 0 && ((size_t)n == state_size || (size_t)n == blob_cap)) {
                   retro_ctx_serialize_info_t info;
                   info.data_const = state_buf;
                   info.data       = NULL;
-                  info.size       = (size_t)n;
+                  info.size       = state_size;
                   core_unserialize(&info);
+                  if ((size_t)n == blob_cap)
+                     WatchStateTrailerApply((const char*)state_buf + state_size);
                   kailleraWatchJumpToLive(frame_index_dl, byte_offset);
-                  s_watch_behind_live = false;
                   PlaybackRewindReset(); /* old checkpoints point into the buffer we just discarded (player_watch_jump_to_live()) - stale */
+                  /* Now at the live edge - play on at 1x from here, whatever
+                     state the click caught us in: fast-forwarding would
+                     just overrun the host and stall, and staying paused
+                     would immediately fall behind again. */
+                  PlaybackSetFastForward(false);
+                  if (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED)
+                     command_event(CMD_EVENT_UNPAUSE, NULL);
                } else {
                   runloop_msg_queue_push("Falha ao baixar o sync ao vivo do host.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
                }
