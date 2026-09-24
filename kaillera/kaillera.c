@@ -369,6 +369,38 @@ void CloseKaillera() {
       kailleraPlaybackMode = false;
       CloseHandle(KailleraHandle);
    }
+
+   /* Per-frame ticks in core_run() call through these pointers whenever
+      kailleraNetplay is set - clear the session state and every optional
+      export before the DLL is unloaded, or the next plain content load
+      calls into freed memory. */
+   kailleraNetplay             = false;
+   kailleraPlaybackMode        = false;
+   kailleraInitialisedInternal = 0;
+   kailleraWaitSaveLoad        = 0;
+   stop_execute_shit           = 0;
+
+   kailleraIsPlaybackModeF                 = NULL;
+   kailleraRetryConnectCanControlF         = NULL;
+   kailleraRetryConnectNotifyLocalControlF = NULL;
+   kailleraRetryConnectPollF               = NULL;
+   kailleraRetryConnectActiveF             = NULL;
+   kailleraRetryConnectUploadStateF        = NULL;
+   kailleraRetryConnectDownloadStateF      = NULL;
+   kailleraRetryConnectGetFrameIndexF      = NULL;
+   kailleraRetryConnectGetTotalFramesF     = NULL;
+   kailleraRetryConnectSeekLocalF          = NULL;
+   kailleraPlaybackGetFrameIndexF          = NULL;
+   kailleraPlaybackSeekToFrameF            = NULL;
+   kailleraPlaybackGetTotalFramesF         = NULL;
+   kailleraPlaybackStopF                   = NULL;
+   kailleraWatchRequestStateF              = NULL;
+   kailleraWatchStateReadyF                = NULL;
+   kailleraWatchDownloadStateF             = NULL;
+   kailleraWatchJumpToLiveF                = NULL;
+   kailleraStreamCheckStateRequestedF      = NULL;
+   kailleraStreamUploadStateF              = NULL;
+
    if (kailleraDLL)
       FreeLibrary(kailleraDLL);
    kailleraDLL = NULL;
