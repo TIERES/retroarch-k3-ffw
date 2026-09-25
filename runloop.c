@@ -4233,12 +4233,13 @@ static void runloop_path_init_savefile_internal(runloop_state_t *runloop_st)
 
 static void runloop_path_init_savefile(runloop_state_t *runloop_st)
 {
-   /* Kaillera game: never write the match's memory card over the player's
-      own .srm (autosave included) - see event_init_content(). */
+   /* Kaillera "Sem M. Card" game or any Kaillera playback: never write the
+      match's memory card over the player's own .srm (autosave included) -
+      see event_init_content(). */
    bool    should_sram_be_used =
           (runloop_st->flags & RUNLOOP_FLAG_USE_SRAM)
       && !(runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED)
-      && !kailleraSyncActive();
+      && !kailleraSyncBlockSramSave();
 
    if (should_sram_be_used)
       runloop_st->flags |=  RUNLOOP_FLAG_USE_SRAM;
@@ -4297,11 +4298,12 @@ static bool event_init_content(
 
    runloop_path_init_savefile(runloop_st);
 
-   /* Kaillera game: each player's own .srm would make the machines boot
-      differently - everybody starts from the core's blank state instead. */
+   /* Kaillera "Sem M. Card" game: each player's own .srm would make the
+      machines boot differently - everybody starts from the core's blank
+      state instead. With the room's checkbox off, cards load as usual. */
    if (!event_load_save_files(
             (runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED)
-            || kailleraSyncActive()))
+            || kailleraSyncBlockSram()))
       RARCH_LOG("[SRAM]: %s\n",
             msg_hash_to_str(MSG_SKIPPING_SRAM_LOAD));
 
@@ -8206,11 +8208,31 @@ void core_run(void)
          }
 #endif
       //}
-      current_core->retro_run();
+      switch (kailleraSyncFrameMode())
+      {
+         case KSYNC_FRAME_FROZEN:
+            /* Anti-desync rollback countdown: the input stream keeps
+               flowing (above) so both machines stay on the same frame and
+               the server keeps us alive, but the game stands still. */
+            video_driver_cached_frame();
+            break;
+         case KSYNC_FRAME_RENDER:
+            /* ...except for one frame right after loading a restore point,
+               with neutral input on every machine, to show where it went. */
+            for (int i = 0; i < MAX_INPUTS; i++)
+               for (int k = 1; k < 6; k++)
+                  joy[i][k] = 0;
+            current_core->retro_run();
+            break;
+         default:
+            current_core->retro_run();
 
-      /* RAM digest for the anti-desync detector - after the frame, before
-         any networked save/load/reset command below touches the state. */
-      kailleraSyncAfterFrame(current_core_frame);
+            /* RAM digest / restore points for the anti-desync detector -
+               after the frame, before any networked save/load/reset command
+               below touches the state. */
+            kailleraSyncAfterFrame(current_core_frame);
+            break;
+      }
    } else {
       if (early_polling)
          input_driver_poll();
@@ -8273,6 +8295,11 @@ void core_run(void)
          kReceivedCommand = 0;
          break;
       }
+      case COMMAND_DESYNC_RESTORE:
+      case COMMAND_DESYNC_RESUME:
+         kailleraSyncOnCommand(kReceivedCommand);
+         kReceivedCommand = 0;
+         break;
       default:
          RARCH_ERR("Kaillera command error: Recevied unknown command!\n");
          //kailleraChatSendExternal("Recevied unknown command!");

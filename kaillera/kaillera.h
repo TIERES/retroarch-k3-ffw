@@ -20,6 +20,11 @@
 #define COMMAND_SWAP 4
 #define COMMAND_TAKE 5
 #define COMMAND_SWAP_RESET 6
+/* Anti-desync rollback (kaillera_sync.c) - like the ones above, sent inside
+   the input stream so every machine executes them after the same frame.
+   RESTORE carries the restore point's id in bits 4-15. */
+#define COMMAND_DESYNC_RESTORE 7
+#define COMMAND_DESYNC_RESUME  8
 
 /* retry-connect - must match kaillera-client's kcore/k_instruction.h
    RC_ACTION_* exactly (two separate repos, no shared header). */

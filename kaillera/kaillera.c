@@ -55,6 +55,7 @@ char* kailleraGames;
 
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
 extern int (WINAPI* kailleraIsPlaybackModeF)();
+extern int (WINAPI* kailleraGetNoMemoryCardF)();
 #endif
 
 
@@ -80,7 +81,14 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
 
    /* Before kailleraInitialisedInternal below lets the main thread start
       loading content - resets the anti-desync handshake/BIOS capture. */
-   kailleraSyncGameBegin(kNumPlayers, kailleraPlaybackMode);
+   {
+      bool no_memcard = true;
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+      if (kailleraGetNoMemoryCardF != NULL)
+         no_memcard = kailleraGetNoMemoryCardF() != 0;
+#endif
+      kailleraSyncGameBegin(kNumPlayers, kailleraPlaybackMode, no_memcard);
+   }
 
    settings->bools.preemptive_frames_enable = false;
    settings->bools.menu_pause_libretro = false;
@@ -338,6 +346,10 @@ int (WINAPI* kailleraEndGameF)();
    left false) for any DLL that doesn't. */
 int (WINAPI* kailleraIsPlaybackModeF)();
 
+/* The room's "Sem M. Card" checkbox (kaillera-client) - optional, NULL on
+   older DLLs, which means "no memory card" like before the checkbox existed. */
+int (WINAPI* kailleraGetNoMemoryCardF)();
+
 /* retry-connect - optional, same GetProcAddress-if-present convention as
    kailleraIsPlaybackModeF above. See kaillera.h. */
 int (WINAPI* kailleraRetryConnectCanControlF)();
@@ -392,6 +404,7 @@ void CloseKaillera() {
    stop_execute_shit           = 0;
 
    kailleraIsPlaybackModeF                 = NULL;
+   kailleraGetNoMemoryCardF                = NULL;
    kailleraRetryConnectCanControlF         = NULL;
    kailleraRetryConnectNotifyLocalControlF = NULL;
    kailleraRetryConnectPollF               = NULL;
@@ -597,6 +610,7 @@ void LoadKaillera() {
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "kailleraChatSend");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraEndGame");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraIsPlaybackMode");
+      kailleraGetNoMemoryCardF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraGetNoMemoryCard");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
@@ -626,6 +640,7 @@ void LoadKaillera() {
       kailleraChatSendF = (int (WINAPI*)(char* text)) GetProcAddress(kailleraDLL, "_kailleraChatSend@4");
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraEndGame@0");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraIsPlaybackMode@0");
+      kailleraGetNoMemoryCardF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraGetNoMemoryCard@0");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");

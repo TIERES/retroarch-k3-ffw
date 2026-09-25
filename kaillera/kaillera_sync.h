@@ -33,8 +33,11 @@
 /* Main thread, once, from LoadKaillera() - before any game can start. */
 void kailleraSyncInit(void);
 
-/* From the Kaillera game callback (DLL thread), before content loads. */
-void kailleraSyncGameBegin(int num_players, bool playback);
+/* From the Kaillera game callback (DLL thread), before content loads.
+   no_memcard = the room's "Sem M. Card" checkbox (kaillera-client): no memory
+   card in either slot and no .srm load/save; false = everyone keeps their
+   own cards, and the fingerprint compares card 1's contents instead. */
+void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard);
 
 /* Main thread, right after the Kaillera game's content finished loading. */
 void kailleraSyncContentLoaded(void);
@@ -53,6 +56,28 @@ void kailleraSyncAfterFrame(unsigned frame);
    starts here, numbering frames from this point. */
 void kailleraSyncRetryConnectGoLive(void);
 
+/* 5./6. Restore points + rollback. Every ~10s each machine serializes the
+   core at the same frame and keeps the last few, trading a hash of each.
+   When the detector finds a desync, BACKSPACE (host = player 1 only, RetroArch window
+   focused) rolls everyone back - through COMMAND_DESYNC_RESTORE in the
+   input stream, so all machines load their own copy of the same verified
+   point after the same frame - and freezes the game for a countdown in
+   which BACKSPACE goes further back; player 1 then sends COMMAND_DESYNC_RESUME
+   and everyone continues from the same frame. */
+enum
+{
+   KSYNC_FRAME_RUN = 0, /* normal frame: run the core */
+   KSYNC_FRAME_FROZEN,  /* rollback countdown: don't run the core */
+   KSYNC_FRAME_RENDER   /* frozen, but run this one frame with neutral input
+                           to show the point just restored */
+};
+
+/* core_run(), every Kaillera frame, instead of an unconditional retro_run(). */
+int kailleraSyncFrameMode(void);
+
+/* core_run()'s post-frame command switch: COMMAND_DESYNC_RESTORE/RESUME. */
+void kailleraSyncOnCommand(int command);
+
 /* Whenever a Kaillera game ends. */
 void kailleraSyncGameEnd(void);
 
@@ -62,6 +87,15 @@ bool kailleraSyncHandleChat(const char *nick, const char *text);
 
 /* True while a Kaillera game is loading or running. */
 bool kailleraSyncActive(void);
+
+/* ...and it's a "Sem M. Card" game: keep each player's .srm out of it (no
+   load). */
+bool kailleraSyncBlockSram(void);
+
+/* No .srm save either: "Sem M. Card" games, and any playback (replay, Watch
+   Live, retry-connect) - those load the viewer's card when the match was
+   played with cards, but must never write the match's saves onto it. */
+bool kailleraSyncBlockSramSave(void);
 
 /* RETRO_ENVIRONMENT_GET_VARIABLE hook: forced value for `key`, or NULL. */
 const char *kailleraSyncForcedCoreOption(const char *key);
