@@ -1155,6 +1155,7 @@ RETROARCH
 #include "../retroarch.c"
 #include "../runloop.c"
 #include "../kaillera/kaillera.c"
+#include "../kaillera/kaillera_sync.c"
 #ifdef HAVE_RUNAHEAD
 #include "../runahead.c"
 #endif

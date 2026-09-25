@@ -233,6 +233,7 @@
 
 #include "retroarch.h"
 #include "kaillera/kaillera.h"
+#include "kaillera/kaillera_sync.h"
 
 #include "accessibility.h"
 
@@ -892,6 +893,15 @@ static void libretro_log_cb(
    settings_t        *settings = config_get_ptr();
    unsigned libretro_log_level = settings->uints.libretro_log_level;
 
+   /* Before the level/verbosity checks below - the Kaillera anti-desync
+      fingerprint needs the core's BIOS lines even with logging turned off. */
+   if (kailleraSyncActive())
+   {
+      va_start(vp, fmt);
+      kailleraSyncCoreLog(fmt, vp);
+      va_end(vp);
+   }
+
    if ((unsigned)level < libretro_log_level)
       return;
 
@@ -1479,6 +1489,14 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                   var->key, &opt_idx))
                var->value = core_option_manager_get_val(
                      runloop_st->core_options, opt_idx);
+
+            /* Kaillera game: every player must emulate with the same
+               values - overrides the player's own .opt in memory only. */
+            {
+               const char *forced = kailleraSyncForcedCoreOption(var->key);
+               if (forced)
+                  var->value = forced;
+            }
 
             if (!var->value)
             {
@@ -4215,9 +4233,12 @@ static void runloop_path_init_savefile_internal(runloop_state_t *runloop_st)
 
 static void runloop_path_init_savefile(runloop_state_t *runloop_st)
 {
+   /* Kaillera game: never write the match's memory card over the player's
+      own .srm (autosave included) - see event_init_content(). */
    bool    should_sram_be_used =
           (runloop_st->flags & RUNLOOP_FLAG_USE_SRAM)
-      && !(runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED);
+      && !(runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED)
+      && !kailleraSyncActive();
 
    if (should_sram_be_used)
       runloop_st->flags |=  RUNLOOP_FLAG_USE_SRAM;
@@ -4276,8 +4297,11 @@ static bool event_init_content(
 
    runloop_path_init_savefile(runloop_st);
 
-   if (!event_load_save_files(runloop_st->flags &
-            RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED))
+   /* Kaillera game: each player's own .srm would make the machines boot
+      differently - everybody starts from the core's blank state instead. */
+   if (!event_load_save_files(
+            (runloop_st->flags & RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED)
+            || kailleraSyncActive()))
       RARCH_LOG("[SRAM]: %s\n",
             msg_hash_to_str(MSG_SKIPPING_SRAM_LOAD));
 
@@ -4311,7 +4335,9 @@ static bool event_init_content(
      if (!(input_st->bsv_movie_state.flags & (BSV_FLAG_MOVIE_START_RECORDING | BSV_FLAG_MOVIE_START_PLAYBACK)))
 #endif
       {
-        if (!runloop_st->entry_state_slot && settings->bools.savestate_auto_load)
+        if (     !runloop_st->entry_state_slot
+              && settings->bools.savestate_auto_load
+              && !kailleraSyncActive())
           command_event_load_auto_state();
       }
    }
@@ -4737,11 +4763,13 @@ bool runloop_event_init_core(
    runloop_st->current_core.retro_init();
    runloop_st->current_core.flags         |= RETRO_CORE_FLAG_INITED;
 
-   /* Attempt to set initial disk index */
-   disk_control_set_initial_index(
-         &sys_info->disk_control,
-         path_get(RARCH_PATH_CONTENT),
-         runloop_st->savefile_dir);
+   /* Attempt to set initial disk index - not in a Kaillera game, where
+      the index remembered in each player's save folder could differ. */
+   if (!kailleraSyncActive())
+      disk_control_set_initial_index(
+            &sys_info->disk_control,
+            path_get(RARCH_PATH_CONTENT),
+            runloop_st->savefile_dir);
 
    if (!event_init_content(runloop_st, settings, input_st))
    {
@@ -8057,6 +8085,9 @@ void core_run(void)
       kailleraPlaybackRewindTick();
       kailleraRetryConnectToolbarTick();
 
+      /* Anti-desync fingerprint: sends ours / compares everyone's. */
+      kailleraSyncFrameTick();
+
       if (kailleraCommands) {
 #ifdef KAILLERA_DEFAULT
          netjoy[0][0] = kailleraCommands;
@@ -8132,7 +8163,8 @@ void core_run(void)
          default:
          {
 #endif
-            if (kailleraSyncData(netjoy_ex, 12) != -1)
+            int k_len = kailleraSyncData(netjoy_ex, 12);
+            if (k_len > 0)
             {
                for (int i = 0; i < kNumPlayers; i++) {
                   if (netjoy_ex[i][0]) {
@@ -8145,6 +8177,22 @@ void core_run(void)
                   }
                }
                //kaillera_buttons_write = 1; //sigh
+            }
+            else if (k_len == 0)
+            {
+               /* No combined frame yet - the client's own input-delay frames
+                  (the first `delay` calls after the game starts, and again
+                  right after a retry-connect go-live). The DLL left netjoy_ex
+                  untouched, so it still holds this machine's own outgoing
+                  input and whatever the last frame (e.g. the last replay
+                  frame) put in the other slots - different on every machine.
+                  At game start INIT_FRAMES masked that; after a go-live
+                  nothing did. Everyone plays these frames with neutral input
+                  instead, and no command is taken from them (ours was sent
+                  and comes back through the stream like everyone else's). */
+               for (int i = 0; i < MAX_INPUTS; i++)
+                  for (int k = 1; k < 6; k++)
+                     joy[i][k] = 0;
             }
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
             else {
@@ -8159,6 +8207,10 @@ void core_run(void)
 #endif
       //}
       current_core->retro_run();
+
+      /* RAM digest for the anti-desync detector - after the frame, before
+         any networked save/load/reset command below touches the state. */
+      kailleraSyncAfterFrame(current_core_frame);
    } else {
       if (early_polling)
          input_driver_poll();

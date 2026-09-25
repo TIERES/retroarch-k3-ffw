@@ -65,6 +65,7 @@
 #include "verbosity.h"
 #include "version.h"
 #include "version_git.h"
+#include "kaillera/kaillera_sync.h"
 
 #define CMD_BUF_SIZE           4096
 
@@ -1131,6 +1132,10 @@ void command_event_init_controllers(rarch_system_info_t *sys_info,
             break;
          }
       }
+
+      /* Kaillera game: same controller type on every machine, regardless
+         of each player's own device setting or input_max_users. */
+      device = kailleraSyncForcedDevice(port, device);
 
       desc = libretro_find_controller_description(
             &sys_info->ports.data[port], device);

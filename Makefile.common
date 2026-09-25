@@ -236,6 +236,7 @@ endif
 
 OBJ += frontend/frontend_driver.o \
        kaillera/kaillera.o \
+       kaillera/kaillera_sync.o \
        retroarch.o \
        runloop.o \
        ui/ui_companion_driver.o \

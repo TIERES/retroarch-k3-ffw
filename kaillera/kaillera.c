@@ -17,6 +17,7 @@ static pthread_t threadk;
 #include "paths.h"
 #include "string/stdstring.h"
 #include "kaillera.h"
+#include "kaillera_sync.h"
 #include "../tasks/tasks_internal.h"
 #include "../libretro-common/include/queues/message_queue.h"
 #include "command.h"
@@ -77,6 +78,10 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
    kailleraPlaybackMode = (kailleraIsPlaybackModeF != NULL) && (kailleraIsPlaybackModeF() != 0);
 #endif
 
+   /* Before kailleraInitialisedInternal below lets the main thread start
+      loading content - resets the anti-desync handshake/BIOS capture. */
+   kailleraSyncGameBegin(kNumPlayers, kailleraPlaybackMode);
+
    settings->bools.preemptive_frames_enable = false;
    settings->bools.menu_pause_libretro = false;
    settings->bools.run_ahead_enabled = false;
@@ -120,6 +125,10 @@ static void WINAPI kailleraChatReceivedCallback(char* nick, char* text)
 {
    char new_msg[320];
    new_msg[0] = '\0';
+
+   /* Anti-desync fingerprint line - handled silently, never shown. */
+   if (kailleraSyncHandleChat(nick, text))
+      return;
 
    if (*text == '!') {
       text++;
@@ -219,6 +228,7 @@ n02ClientInfoInterface clientInfo;
 static void N02CCNV nGameEnd() //called from client
 {
    if (kailleraInitialisedInternal) {
+      kailleraSyncGameEnd();
       kailleraWaitSaveLoad = 0;
       kailleraNetplay = false;
       kailleraInitialisedInternal = 0;
@@ -374,6 +384,7 @@ void CloseKaillera() {
       kailleraNetplay is set - clear the session state and every optional
       export before the DLL is unloaded, or the next plain content load
       calls into freed memory. */
+   kailleraSyncGameEnd();
    kailleraNetplay             = false;
    kailleraPlaybackMode        = false;
    kailleraInitialisedInternal = 0;
@@ -568,6 +579,8 @@ static int InitialiseKaillera() {
 
 void LoadKaillera() {
    if (kailleraInitialised) return;
+
+   kailleraSyncInit();
 
    kailleraDLL = LoadLibrary("kailleraclient.dll");
 
@@ -1896,7 +1909,15 @@ static void RetryConnectStartCountdown(void) {
    s_rc_last_announced_second = -1;
 }
 
-void kailleraRetryConnectCaptureAndSendState() {
+/* With reload_locally, the host also loads the exact blob it just sent back
+   into its own core - used for the final capture right before go-live (see
+   TickRetryConnectSequence()). Otherwise the host would resume live play from
+   its natively emulated state while every peer resumes from a *deserialized*
+   one, and this core's serialize/unserialize isn't provably complete (see the
+   big comment below): whatever unserialize rebuilds or resets instead of
+   restoring would then differ between the two sides from the very first live
+   frame. Loading the same blob on both sides makes that part identical. */
+static void RetryConnectCaptureAndSendState(bool reload_locally) {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
 #else
@@ -1910,6 +1931,13 @@ void kailleraRetryConnectCaptureAndSendState() {
       info.size       = state_size;
       if (core_serialize(&info)) {
          kailleraRetryConnectUploadState(state_buf, (int)state_size);
+         if (reload_locally) {
+            retro_ctx_serialize_info_t load;
+            load.data_const = state_buf;
+            load.data       = NULL;
+            load.size       = state_size;
+            core_unserialize(&load);
+         }
       } else
          kailleraRetryConnectNotify(RC_ACTION_PAUSE);
       free(state_buf);
@@ -1917,6 +1945,10 @@ void kailleraRetryConnectCaptureAndSendState() {
       kailleraRetryConnectNotify(RC_ACTION_PAUSE);
    }
 #endif
+}
+
+void kailleraRetryConnectCaptureAndSendState() {
+   RetryConnectCaptureAndSendState(false);
 }
 
 /* Downloads the state the host just uploaded and loads it, staying paused -
@@ -1980,8 +2012,10 @@ static void TickRetryConnectSequence(void) {
             then is not reliably identical to what the host is actually
             sitting on right now. Re-sending here guarantees the peer loads
             EXACTLY the state the host is about to go live from, instead of
-            whatever it happened to be a Pause or two ago. */
-         kailleraRetryConnectCaptureAndSendState();
+            whatever it happened to be a Pause or two ago - and the host
+            reloads that same blob itself, so both sides go live from the
+            same deserialized state (see RetryConnectCaptureAndSendState()). */
+         RetryConnectCaptureAndSendState(true);
          kailleraRetryConnectNotify(RC_ACTION_GO_LIVE);
          RetryConnectStartCountdown();
       }
@@ -1996,6 +2030,9 @@ static void TickRetryConnectSequence(void) {
                s_rc_neutral_input_until = 1;
             command_event(CMD_EVENT_UNPAUSE, NULL);
             kailleraRetryConnectRefreshPlaybackMode();
+            /* Host and peers reach this with no frame run since loading the
+               same state - start the RAM desync detector counting from here. */
+            kailleraSyncRetryConnectGoLive();
          } else {
             /* retry-connect: on-screen countdown, once per second - purely
                local (each side counts down its own instance of this same
@@ -2215,6 +2252,7 @@ void kailleraChatSendExternal(const char* messge) {
 
 void EndKailleraGame() {
    if (kailleraInitialisedInternal) {
+      kailleraSyncGameEnd();
       kailleraWaitSaveLoad = 0;
       kailleraNetplay = false;
       kailleraPlaybackMode = false;
@@ -2310,6 +2348,8 @@ void kMessage_core_info()
       kailleraPacketSize = KAILLERA_NEED_ANALOG; //8 bytes should be always until we find stable way detect core input size before loading
 #endif
    }
+
+   kailleraSyncContentLoaded();
 }
 
 void cp1251_to_utf8(char* out, const char* in) {

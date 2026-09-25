@@ -6138,16 +6138,14 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
    /* Read input state */
    if (kailleraNetplay) {
 
-      unsigned mapped_port;
-      unsigned* input_remap_port_map = settings->uints.input_remap_port_map[port];
+      /* Core port N always reads Kaillera slot N. Each player's local
+         input_remap_port_map / input_max_users used to decide this, so two
+         machines could feed the same frame to different ports. */
+      unsigned mapped_port = port;
       bool bitmask_enabled = false;
-      unsigned max_users = settings->uints.input_max_users;
 
-      while ((mapped_port = *(input_remap_port_map++)) < MAX_USERS)
+      if (mapped_port < MAX_INPUTS)
       {
-         if (mapped_port >= max_users)
-            continue;
-
          device &= RETRO_DEVICE_MASK;
          bitmask_enabled = (device == RETRO_DEVICE_JOYPAD) &&
             (id == RETRO_DEVICE_ID_JOYPAD_MASK);
