@@ -40,10 +40,6 @@
 HWND win32_get_window(void);
 #endif
 
-#ifdef KAILLERA_SYNC_TEST
-extern bool ksync_test_key_down; /* test harness seam - see ksync_rollback_key_pressed() */
-#endif
-
 /* Bump when the "[SYNC]" line format or the meaning of a field changes -
    fingerprints from a different protocol version are never compared. */
 #define KSYNC_PROTOCOL        "1"
@@ -111,6 +107,11 @@ static const struct
    { "pcsx_rearmed_gteregsunneeded",      "disabled" },
    { "pcsx_rearmed_nogteflags",           "disabled" },
    { "pcsx_rearmed_gpu_slow_llists",      "auto"     },
+   /* Not just a speed setting: threaded and non-threaded GPU emulate
+      different timings, so the game runs differently from boot (and a
+      spectator's state diverges ~5s after "Ir ao vivo!"). "auto" = the
+      package default = threaded on any 2+ core CPU. */
+   { "pcsx_rearmed_gpu_thread_rendering", "auto"     },
    { "pcsx_rearmed_cd_turbo",             "disabled" },
    { "pcsx_rearmed_noxadecoding",         "enabled"  },
    { "pcsx_rearmed_nocdaudio",            "enabled"  },
@@ -1427,40 +1428,6 @@ static int ksync_compare_states(ksync_peer_t *peer, char (*log)[320], int max_lo
 /* 4. (cont.) Per-frame RAM digest + restore point capture                   */
 /* ------------------------------------------------------------------------ */
 
-/* Test hook, same spirit as kaillera-client's N02_KREC_TEST_PAUSE_FRAME: with
-   the environment variable KAILLERA_SYNC_TEST_DESYNC set, F10 (RetroArch
-   window focused) flips one byte of THIS machine's RAM - a real, deliberate
-   desync to exercise the detector and the rollback end to end. Inert unless
-   explicitly enabled. */
-static void ksync_test_desync_hotkey(uint8_t *ram, size_t size)
-{
-#if defined(_WIN32) && !defined(KAILLERA_SYNC_TEST)
-   static int  enabled  = -1;
-   static bool was_down = false;
-   bool down;
-
-   if (enabled < 0)
-      enabled = getenv("KAILLERA_SYNC_TEST_DESYNC") != NULL;
-   if (!enabled)
-      return;
-
-   down = (GetAsyncKeyState(VK_F10) & 0x8000)
-      && GetForegroundWindow() == win32_get_window();
-   if (down && !was_down)
-   {
-      ram[size / 2] ^= 0xFF;
-      runloop_msg_queue_push("TESTE: desync provocado neste PC (F10).", 2,
-            3 * 60, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT,
-            MESSAGE_QUEUE_CATEGORY_WARNING);
-      ksync_log("TESTE: desync provocado com F10 no frame %u.", ksync_last_frame);
-   }
-   was_down = down;
-#else
-   (void)ram;
-   (void)size;
-#endif
-}
-
 void kailleraSyncAfterFrame(unsigned frame)
 {
    struct retro_core_t *core = &runloop_state_get_ptr()->current_core;
@@ -1500,8 +1467,6 @@ void kailleraSyncAfterFrame(unsigned frame)
    size = core->retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
    if (!ram || !size)
       return;
-
-   ksync_test_desync_hotkey((uint8_t*)ram, size);
 
    frame           -= ksync_frame_base;
    ksync_last_frame = frame;
@@ -1603,9 +1568,7 @@ static bool ksync_rollback_key_pressed(void)
    static bool was_down = false;
    bool down, edge;
 
-#if defined(KAILLERA_SYNC_TEST)
-   down = ksync_test_key_down;
-#elif defined(_WIN32)
+#if defined(_WIN32)
    down = (GetAsyncKeyState(KSYNC_ROLLBACK_VK) & 0x8000)
       && GetForegroundWindow() == win32_get_window();
 #else
