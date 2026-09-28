@@ -29,6 +29,7 @@ static pthread_t threadk;
 #include <commctrl.h> /* TOOLTIPS_CLASSA - playback toolbar's button tooltips */
 #include <commdlg.h> /* GetOpenFileNameA - kailleraFindOrBrowseGame()'s manual-pick fallback */
 #include "file/file_path.h" /* path_is_valid/fill_pathname_basedir - same fallback's folder search */
+#include "core_info.h" /* core_info_get_list - same fallback's core lookup */
 
  
 bool kailleraInitialised;
@@ -379,6 +380,7 @@ int (WINAPI* kailleraWatchRequestStateF)();
 int (WINAPI* kailleraWatchStateReadyF)();
 int (WINAPI* kailleraWatchDownloadStateF)(void* outBuffer, int bufferCap, int* outFrameIndex, int* outByteOffset);
 void (WINAPI* kailleraWatchJumpToLiveF)(int frameIndex, int byteOffset);
+int (WINAPI* kailleraWatchGoLiveLockedF)();
 int (WINAPI* kailleraStreamCheckStateRequestedF)();
 void (WINAPI* kailleraStreamUploadStateF)(int frameIndex, const void* data, int size);
 
@@ -422,6 +424,7 @@ void CloseKaillera() {
    kailleraWatchStateReadyF                = NULL;
    kailleraWatchDownloadStateF             = NULL;
    kailleraWatchJumpToLiveF                = NULL;
+   kailleraWatchGoLiveLockedF              = NULL;
    kailleraStreamCheckStateRequestedF      = NULL;
    kailleraStreamUploadStateF              = NULL;
 
@@ -517,21 +520,86 @@ static bool BrowseForGameFile(const char* wantedFilename, char* outPath, size_t 
    return true;
 }
 
+// The "<label>" part of a "<label>: <file>" game name, from a core name -
+// the same rule AddGamesToList() applies: the text inside the first "(...)"
+// if any ("Sony - PlayStation (PCSX ReARMed)" -> "PCSX ReARMed"), else the
+// whole name.
+static void KailleraCoreLabel(const char* coreName, char* out, size_t cap) {
+   const char* open = strchr(coreName, '(');
+   if (open != NULL) {
+      const char* close = strchr(open + 1, ')');
+      size_t n = close ? (size_t)(close - (open + 1)) : strlen(open + 1);
+      if (n >= cap)
+         n = cap - 1;
+      memcpy(out, open + 1, n);
+      out[n] = '\0';
+   } else
+      strlcpy(out, coreName, cap);
+}
+
+// Which core a room's game needs, from the label its name starts with:
+// first a history entry played with that core, then any installed core
+// whose display name gives the same label (its .info file). Never "the core
+// that happens to be loaded" - the Kaillera window also opens from the main
+// menu with no core at all, and that left the match with no core to start
+// ("Falha em abrir o nucleo Libretro" + the player dropped).
+static bool KailleraFindCoreForLabel(const char* label, char* out, size_t cap) {
+   core_info_list_t* list = NULL;
+   const char* p = kailleraRomNames;
+   size_t label_len = strlen(label);
+   size_t i;
+   int g;
+
+   for (g = 0; g < totalGames; g++) {
+      const char* sep = strstr(p, ": ");
+      if (sep != NULL && (size_t)(sep - p) == label_len && strncmp(p, label, label_len) == 0
+            && path_is_valid(corePaths[g])) {
+         strlcpy(out, corePaths[g], cap);
+         return true;
+      }
+      p += strlen(p) + 1;
+   }
+
+   if (core_info_get_list(&list) && list != NULL) {
+      for (i = 0; i < list->count; i++) {
+         const core_info_t* info = &list->list[i];
+         char info_label[128];
+         if (info->path == NULL || info->display_name == NULL)
+            continue;
+         KailleraCoreLabel(info->display_name, info_label, sizeof(info_label));
+         if (string_is_equal(info_label, label) && path_is_valid(info->path)) {
+            strlcpy(out, info->path, cap);
+            return true;
+         }
+      }
+   }
+
+   /* No core info at all (no .info files): the loaded core, if any, is the
+      only guess left. */
+   if (list == NULL || list->count == 0) {
+      const char* current = path_get(RARCH_PATH_CORE);
+      if (current != NULL && path_is_valid(current)) {
+         strlcpy(out, current, cap);
+         return true;
+      }
+   }
+   return false;
+}
+
 // Called (via the new kInfos.findOrBrowseGameCallback) when the DLL's own
 // plain-string match against kailleraRomNames failed for a room the user
 // is trying to join - kaillera_ui.cpp's kailelra_sdlg_join_selected_game()
 // would otherwise immediately show "The rom '...' is not in your list."
-// Tries, in order:
+// First resolves the core from the name's "<label>: " prefix
+// (KailleraFindCoreForLabel()) - without one there is nothing to start the
+// game with, so it says so and gives up before asking for any file. Then
+// looks for the file, in order:
 //   1. Search every folder already referenced by a content-history entry
 //      for a file with the exact wanted filename (same folder as some ROM
 //      the user has played before - the common case for anyone with more
 //      than one ROM per folder). Naturally a no-op when the history is
 //      empty (the loop just doesn't run), falling straight through to (2).
-//   2. Fall back to the native file-pick dialog above, paired with
-//      whichever core is currently loaded (this only ever runs from
-//      inside an already-active Kaillera session, which requires a core
-//      to already be running - the overwhelmingly common case is picking
-//      a different ROM for that SAME system/core).
+//   2. Fall back to the native file-pick dialog above.
 // Either way, on success the match is registered into kailleraRomNames/
 // filePathK/corePaths under the EXACT wanted display name (AppendGameEntry()
 // above), so nGameLoad() resolves it completely normally - exactly like
@@ -545,28 +613,43 @@ static bool BrowseForGameFile(const char* wantedFilename, char* outPath, size_t 
 static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
    const char* sep = strstr(wantedGame, ": ");
    const char* wantedFilename = sep ? sep + 2 : wantedGame;
+   char label[128];
    char candidate[1024];
    char corePath[512];
    bool found = false;
    int i;
+
+   label[0] = '\0';
+   if (sep != NULL) {
+      size_t n = (size_t)(sep - wantedGame);
+      if (n >= sizeof(label))
+         n = sizeof(label) - 1;
+      memcpy(label, wantedGame, n);
+      label[n] = '\0';
+   }
+
+   if (!KailleraFindCoreForLabel(label, corePath, sizeof(corePath))) {
+      char msg[400];
+      _snprintf(msg, sizeof(msg),
+            "Esta sala usa o nucleo \"%s\", que nao foi encontrado neste RetroArch.\n\n"
+            "Instale esse nucleo (Menu principal > Atualizador online > Baixar nucleo) "
+            "e tente entrar de novo.", label[0] ? label : wantedGame);
+      msg[sizeof(msg) - 1] = '\0';
+      MessageBoxA(win32_get_window(), msg, "Kaillera", MB_OK | MB_ICONWARNING);
+      return 0; /* caller shows its own "not in your list" line too */
+   }
 
    for (i = 0; i < totalGames && !found; i++) {
       if (!path_is_valid(filePathK[i]))
          continue;
       fill_pathname_basedir(candidate, filePathK[i], sizeof(candidate));
       strlcat(candidate, wantedFilename, sizeof(candidate));
-      if (path_is_valid(candidate)) {
-         strlcpy(corePath, corePaths[i], sizeof(corePath));
+      if (path_is_valid(candidate))
          found = true;
-      }
    }
 
-   if (!found) {
-      const char* currentCore = path_get(RARCH_PATH_CORE);
-      if (!BrowseForGameFile(wantedFilename, candidate, sizeof(candidate)))
-         return 0; /* user cancelled - caller shows its own error */
-      strlcpy(corePath, currentCore ? currentCore : "", sizeof(corePath));
-   }
+   if (!found && !BrowseForGameFile(wantedFilename, candidate, sizeof(candidate)))
+      return 0; /* user cancelled - caller shows its own error */
 
    AppendGameEntry(wantedGame, candidate, corePath);
    return 1;
@@ -628,6 +711,7 @@ void LoadKaillera() {
       kailleraWatchStateReadyF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchStateReady");
       kailleraWatchDownloadStateF = (int (WINAPI*)(void*, int, int*, int*)) GetProcAddress(kailleraDLL, "kailleraWatchDownloadState");
       kailleraWatchJumpToLiveF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraWatchJumpToLive");
+      kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchGoLiveLocked");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraStreamCheckStateRequested");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadState");
 #else
@@ -658,6 +742,7 @@ void LoadKaillera() {
       kailleraWatchStateReadyF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchStateReady@0");
       kailleraWatchDownloadStateF = (int (WINAPI*)(void*, int, int*, int*)) GetProcAddress(kailleraDLL, "_kailleraWatchDownloadState@16");
       kailleraWatchJumpToLiveF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraWatchJumpToLive@8");
+      kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchGoLiveLocked@0");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraStreamCheckStateRequested@0");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadState@12");
 #endif
@@ -853,6 +938,16 @@ static void kailleraWatchJumpToLive(int frameIndex, int byteOffset) {
 #else
    if (kailleraWatchJumpToLiveF != NULL)
       kailleraWatchJumpToLiveF(frameIndex, byteOffset);
+#endif
+}
+/* Right after an "Ir ao vivo!" jump the DLL refuses another state request
+   until the spectator pauses or rewinds (kaillera-client's
+   player_watch_golive_locked()) - an older DLL has no such lock. */
+static bool kailleraWatchGoLiveLocked(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   return false;
+#else
+   return (kailleraWatchGoLiveLockedF != NULL) && (kailleraWatchGoLiveLockedF() != 0);
 #endif
 }
 
@@ -1220,16 +1315,89 @@ static bool s_pb_toolbar_holdff_down = false;
 /* "Ir direto para o Ao Vivo!" (PB_BTN_GOLIVE) - Watch Live only (see
    kailleraPlaybackRewindTick()'s is_static_playback check, which now also
    covers Watch Live - true whenever kailleraPlaybackGetTotalFrames() <= 0,
-   i.e. no fixed total, unlike static local-file Playback). Always enabled
-   there (only greyed out while a request is already in flight) - the
-   spectator may be behind the host even right after "Acompanhar ao vivo!"
-   (the initial catch-up from frame 0 isn't instant), so there's no reliable
-   "already at the live edge" state to disable it on. */
+   i.e. no fixed total, unlike static local-file Playback). Greyed out only
+   while a request is in flight, and right after a jump until the spectator
+   pauses or rewinds (kailleraWatchGoLiveLocked()) - the spectator may be
+   behind the host even right after "Acompanhar ao vivo!" (the initial
+   catch-up from frame 0 isn't instant), so there's no reliable "already at
+   the live edge" state to disable it on. */
 static bool s_watch_golive_pending = false; /* request sent, waiting on the host */
-static DWORD s_watch_golive_last_poll = 0;
-static DWORD s_watch_golive_deadline = 0;
 #define WATCH_GOLIVE_POLL_INTERVAL_MS 1000
 #define WATCH_GOLIVE_TIMEOUT_MS 15000 /* host polls every ~3s (n02_stream.cpp) - well clear of that */
+
+/* Click -> "Indo ao vivo em 5..." ... "1..." while waiting on the host ->
+   "Voce agora esta AO VIVO!" the moment the state is loaded - the count
+   stops there rather than holding a state that's already here (every
+   second held is a second further behind live). Past zero it's "Aguardando
+   o host..." until the state arrives. */
+#define WATCH_GOLIVE_COUNTDOWN_S 5
+static DWORD s_watch_golive_started = 0;
+static int   s_watch_golive_shown = -1; /* last second announced; 0 = "Aguardando o host..." */
+
+/* The wait itself - ready poll, then the multi-MB download - runs on a
+   worker thread: on the main thread every one of those blocking HTTP calls
+   froze the picture, countdown included. The main thread only reads
+   `status` and, once it's no longer GOLIVE_JOB_RUNNING, owns everything
+   else again. */
+enum { GOLIVE_JOB_RUNNING = 0, GOLIVE_JOB_OK, GOLIVE_JOB_FAILED, GOLIVE_JOB_TIMEOUT, GOLIVE_JOB_CANCELLED };
+typedef struct {
+   volatile LONG status;
+   volatile LONG cancel; /* the Watch Live session ended - drop the result */
+   void  *buf;
+   size_t cap;
+   int    n;
+   int    frame_index;
+   int    byte_offset;
+} watch_golive_job_t;
+static watch_golive_job_t s_golive_job;
+
+static DWORD WINAPI WatchGoLiveWorker(LPVOID arg) {
+   watch_golive_job_t *job = (watch_golive_job_t*)arg;
+   DWORD deadline = GetTickCount() + WATCH_GOLIVE_TIMEOUT_MS;
+   LONG result = GOLIVE_JOB_TIMEOUT;
+
+   while ((LONG)(GetTickCount() - deadline) < 0) {
+      if (job->cancel) {
+         result = GOLIVE_JOB_CANCELLED;
+         break;
+      }
+      if (kailleraWatchStateReady()) {
+         job->n = kailleraWatchDownloadState(job->buf, (int)job->cap, &job->frame_index, &job->byte_offset);
+         result = (job->n > 0) ? GOLIVE_JOB_OK : GOLIVE_JOB_FAILED;
+         break;
+      }
+      Sleep(WATCH_GOLIVE_POLL_INTERVAL_MS);
+   }
+   InterlockedExchange(&job->status, result);
+   return 0;
+}
+
+/* PB_BTN_GOLIVE click: asks the host for a state and starts the countdown.
+   False if the request couldn't be made (nothing left running). */
+static bool WatchGoLiveStart(void) {
+   size_t state_size = core_serialize_size();
+   HANDLE worker;
+
+   if (!state_size)
+      return false;
+   memset(&s_golive_job, 0, sizeof(s_golive_job)); /* status = GOLIVE_JOB_RUNNING */
+   s_golive_job.cap = state_size + sizeof(watch_state_trailer_t);
+   s_golive_job.buf = malloc(s_golive_job.cap);
+   if (s_golive_job.buf == NULL)
+      return false;
+   if (!kailleraWatchRequestState()
+         || (worker = CreateThread(NULL, 0, WatchGoLiveWorker, &s_golive_job, 0, NULL)) == NULL) {
+      free(s_golive_job.buf);
+      s_golive_job.buf = NULL;
+      return false;
+   }
+   CloseHandle(worker);
+
+   s_watch_golive_pending = true;
+   s_watch_golive_started = GetTickCount();
+   s_watch_golive_shown = -1;
+   return true;
+}
 
 /* Mirrors the FASTMOTION hotkey block's own on/off transitions exactly
    (runloop.c, "Check fastmotion hotkeys") - shared by both FF toolbar
@@ -1367,7 +1535,7 @@ static bool IsWatchLive(void) {
 }
 
 static bool GoLiveEnabled(void) {
-   return IsWatchLive() && !s_watch_golive_pending;
+   return IsWatchLive() && !s_watch_golive_pending && !kailleraWatchGoLiveLocked();
 }
 
 static void PlaybackToolbarPaint(HWND hwnd) {
@@ -1552,15 +1720,11 @@ static LRESULT CALLBACK PlaybackToolbarWndProc(HWND hwnd, UINT msg, WPARAM wp, L
             PlaybackSetFastForward(!(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION));
          } else if (idx == PB_BTN_STOP) {
             kailleraPlaybackStop();
+         } else if (idx == PB_BTN_GOLIVE && IsWatchLive() && !s_watch_golive_pending && kailleraWatchGoLiveLocked()) {
+            runloop_msg_queue_push("Voce ja esta ao vivo - aperte Pause ou Rebobinar para liberar o \"Ir ao vivo!\" de novo.", 0, 120, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
          } else if (idx == PB_BTN_GOLIVE && GoLiveEnabled()) {
-            if (kailleraWatchRequestState()) {
-               s_watch_golive_pending = true;
-               s_watch_golive_last_poll = GetTickCount();
-               s_watch_golive_deadline = GetTickCount() + WATCH_GOLIVE_TIMEOUT_MS;
-               if (s_watch_golive_deadline == 0) s_watch_golive_deadline = 1;
-            } else {
+            if (!WatchGoLiveStart())
                runloop_msg_queue_push("Nao foi possivel pedir o sync ao vivo agora - tente de novo em instantes.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
-            }
          }
          InvalidateRect(hwnd, NULL, FALSE);
       }
@@ -1690,6 +1854,97 @@ static void PlaybackToolbarSetVisible(bool visible) {
 
 #endif /* !N02_WIN32 && !N02_LINUX */
 
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+static void WatchGoLiveFinish(void) {
+   free(s_golive_job.buf);
+   s_golive_job.buf = NULL;
+   s_watch_golive_pending = false;
+}
+
+/* The Watch Live session ended mid-wait: the worker can't be stopped, so
+   it's told to drop its result, and the job is only released once it's done
+   with the buffer. */
+static void WatchGoLiveAbandon(void) {
+   if (!s_watch_golive_pending)
+      return;
+   InterlockedExchange(&s_golive_job.cancel, 1);
+   if (s_golive_job.status != GOLIVE_JOB_RUNNING)
+      WatchGoLiveFinish();
+}
+
+static void WatchGoLiveApply(void) {
+   size_t state_size = s_golive_job.cap - sizeof(watch_state_trailer_t);
+   size_t n          = (size_t)s_golive_job.n;
+   retro_ctx_serialize_info_t info;
+
+   /* state_size alone = a host build older than watch_state_trailer_t (see
+      its own comment) */
+   if (state_size != core_serialize_size() || (n != state_size && n != s_golive_job.cap)) {
+      runloop_msg_queue_push("Falha ao baixar o sync ao vivo do host.", 0, 90, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+      return;
+   }
+   info.data_const = s_golive_job.buf;
+   info.data       = NULL;
+   info.size       = state_size;
+   core_unserialize(&info);
+   if (n == s_golive_job.cap)
+      WatchStateTrailerApply((const char*)s_golive_job.buf + state_size);
+   kailleraWatchJumpToLive(s_golive_job.frame_index, s_golive_job.byte_offset);
+   PlaybackRewindReset(); /* old checkpoints point into the buffer we just discarded (player_watch_jump_to_live()) - stale */
+   /* Now at the live edge - play on at 1x from here, whatever state the
+      click caught us in: fast-forwarding would just overrun the host and
+      stall, and staying paused would immediately fall behind again. */
+   PlaybackSetFastForward(false);
+   if (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED)
+      command_event(CMD_EVENT_UNPAUSE, NULL);
+   runloop_msg_queue_push("Voce agora esta AO VIVO!", 0, 180, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+}
+
+/* Countdown + result of a PB_BTN_GOLIVE click - see WATCH_GOLIVE_COUNTDOWN_S.
+   Runs from kailleraPlaybackRewindTick(), so it keeps going while paused. */
+static void WatchGoLiveTick(DWORD now) {
+   LONG status;
+   int remaining;
+
+   if (!s_watch_golive_pending)
+      return;
+   status = s_golive_job.status;
+   if (s_golive_job.cancel) { /* left over from a session that already ended */
+      if (status != GOLIVE_JOB_RUNNING)
+         WatchGoLiveFinish();
+      return;
+   }
+
+   if (status == GOLIVE_JOB_FAILED || status == GOLIVE_JOB_TIMEOUT) {
+      runloop_msg_queue_push(status == GOLIVE_JOB_TIMEOUT
+            ? "O host nao respondeu ao pedido de sync ao vivo."
+            : "Falha ao baixar o sync ao vivo do host.",
+            0, 90, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+      WatchGoLiveFinish();
+      return;
+   }
+
+   if (status == GOLIVE_JOB_OK) {
+      WatchGoLiveApply();
+      WatchGoLiveFinish();
+      return;
+   }
+
+   remaining = WATCH_GOLIVE_COUNTDOWN_S - (int)((now - s_watch_golive_started) / 1000);
+   if (remaining > 0) {
+      if (remaining != s_watch_golive_shown) {
+         char msg[64];
+         snprintf(msg, sizeof(msg), "Indo ao vivo em %d...", remaining);
+         runloop_msg_queue_push(msg, 0, 75, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         s_watch_golive_shown = remaining;
+      }
+   } else if (s_watch_golive_shown != 0) {
+      runloop_msg_queue_push("Aguardando o host...", 0, 60 * 20, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      s_watch_golive_shown = 0;
+   }
+}
+#endif
+
 void kailleraPlaybackRewindTick(void) {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
@@ -1720,6 +1975,7 @@ void kailleraPlaybackRewindTick(void) {
       old_left_pressed = false;
       old_esc_pressed = false;
       s_pb_virtual_rewind_request = false;
+      WatchGoLiveAbandon();
       return;
    }
 
@@ -1796,53 +2052,12 @@ void kailleraPlaybackRewindTick(void) {
       }
    }
 
-   /* "Ir direto para o Ao Vivo!" - poll for the host's response after a
-      PB_BTN_GOLIVE click (see the toolbar's WM_LBUTTONDOWN handler above).
-      Bounded by WATCH_GOLIVE_TIMEOUT_MS in case the host is running an
-      older DLL/build that never services the request at all - the button
-      just re-arms afterward so the user can try again. */
-   if (s_watch_golive_pending) {
-      if ((LONG)(now - s_watch_golive_deadline) >= 0) {
-         s_watch_golive_pending = false;
-         runloop_msg_queue_push("O host nao respondeu ao pedido de sync ao vivo.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
-      } else if (now - s_watch_golive_last_poll >= WATCH_GOLIVE_POLL_INTERVAL_MS) {
-         s_watch_golive_last_poll = now;
-         if (kailleraWatchStateReady()) {
-            size_t state_size = core_serialize_size();
-            size_t blob_cap   = state_size + sizeof(watch_state_trailer_t);
-            void  *state_buf  = state_size ? malloc(blob_cap) : NULL;
-
-            s_watch_golive_pending = false;
-            if (state_buf != NULL) {
-               int frame_index_dl = 0, byte_offset = 0;
-               int n = kailleraWatchDownloadState(state_buf, (int)blob_cap, &frame_index_dl, &byte_offset);
-               /* state_size alone = a host build older than
-                  watch_state_trailer_t (see its own comment) */
-               if (n > 0 && ((size_t)n == state_size || (size_t)n == blob_cap)) {
-                  retro_ctx_serialize_info_t info;
-                  info.data_const = state_buf;
-                  info.data       = NULL;
-                  info.size       = state_size;
-                  core_unserialize(&info);
-                  if ((size_t)n == blob_cap)
-                     WatchStateTrailerApply((const char*)state_buf + state_size);
-                  kailleraWatchJumpToLive(frame_index_dl, byte_offset);
-                  PlaybackRewindReset(); /* old checkpoints point into the buffer we just discarded (player_watch_jump_to_live()) - stale */
-                  /* Now at the live edge - play on at 1x from here, whatever
-                     state the click caught us in: fast-forwarding would
-                     just overrun the host and stall, and staying paused
-                     would immediately fall behind again. */
-                  PlaybackSetFastForward(false);
-                  if (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED)
-                     command_event(CMD_EVENT_UNPAUSE, NULL);
-               } else {
-                  runloop_msg_queue_push("Falha ao baixar o sync ao vivo do host.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
-               }
-               free(state_buf);
-            }
-         }
-      }
-   }
+   /* "Ir direto para o Ao Vivo!" - countdown and result of a PB_BTN_GOLIVE
+      click (see the toolbar's WM_LBUTTONDOWN handler above). Bounded by
+      WATCH_GOLIVE_TIMEOUT_MS in case the host is running an older DLL/build
+      that never services the request at all - the button just re-arms
+      afterward so the user can try again. */
+   WatchGoLiveTick(now);
 #endif
 }
 
