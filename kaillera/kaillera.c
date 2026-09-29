@@ -1048,32 +1048,32 @@ void kailleraWatchServiceStateRequest(void) {
 #endif
 }
 
-/* Checkpoint-based rewind for solo "Reproducao de Replay" (static local-file
-   Playback only - see kaillera.h's kailleraPlaybackRewindTick()). Deliberately
-   NOT RetroArch's own built-in rewind (state_manager_check_rewind(), the
-   RARCH_REWIND hotkey) - that needs an unbroken per-frame delta history kept
-   continuously from the moment rewind is armed, which doesn't fit well with
-   content fed by a kaillera-style pseudo core_run() and would cost memory
-   the whole time playback runs, for a feature only used occasionally. This
-   is coarser but far cheaper: a full core_serialize() snapshot every
-   PLAYBACK_CHECKPOINT_INTERVAL_FRAMES of actual replay content (using the
-   .krec reader's own frame count via kailleraPlaybackGetFrameIndex() above,
-   not wall-clock time, so spacing stays consistent whatever speed the user
-   is fast-forwarding at), keeping the last PLAYBACK_CHECKPOINT_COUNT of them
-   in a ring buffer. Left steps back through them one at a time - each press
-   loads the next-older checkpoint and re-anchors the .krec reader to its
-   exact frame (kailleraPlaybackSeekToFrame()), without touching pause state
-   either way - playback just keeps going (or stays paused, if that's how
-   the user is scrubbing through checkpoints one at a time). */
+/* Checkpoint-based rewind ("Rebobinar") for solo "Reproducao de Replay",
+   Watch Live and the retry-connect host. Deliberately NOT RetroArch's own
+   built-in rewind (state_manager_check_rewind(), the RARCH_REWIND hotkey) -
+   that needs an unbroken per-frame delta history kept continuously from the
+   moment rewind is armed, which doesn't fit well with content fed by a
+   kaillera-style pseudo core_run() and would cost memory the whole time
+   playback runs, for a feature only used occasionally. This is coarser but
+   far cheaper: a full core_serialize() snapshot every ..._INTERVAL_FRAMES of
+   actual replay content (the reader's own frame count, not wall-clock time,
+   so spacing stays consistent whatever speed the user is fast-forwarding
+   at), the last CHECKPOINT_COUNT of them kept in frame order. */
 #define PLAYBACK_CHECKPOINT_INTERVAL_FRAMES 600 /* ~10s at 60fps */
-#define PLAYBACK_CHECKPOINT_COUNT 10
-/* How long a rewind "gesture" stays open after the last Left press - see
-   kailleraPlaybackRewindTick(). Repeated presses inside this window keep
-   stacking (go back further each time); once it elapses with no further
-   press, playback is treated as having moved on for good, and the next
-   Left press starts counting from zero again instead of stacking onto
-   however many steps were taken before. */
-#define PLAYBACK_REWIND_GESTURE_MS 1000
+#define RC_CHECKPOINT_INTERVAL_FRAMES 600       /* same spacing for retry-connect */
+#define CHECKPOINT_COUNT 10
+
+/* A press never loads anything by itself: it only goes one checkpoint
+   further back and says how far ("Rebobinar: voltar 20 s"), and the state is
+   loaded once, REWIND_APPLY_DELAY_MS after the last press. Each press used to
+   load a multi-MB state on the spot (in retry-connect also uploading it to
+   every peer), so hammering the button stacked load after load. And a
+   checkpoint less than REWIND_MIN_BACK_FRAMES behind the current position is
+   never a target: the first press after a rewind used to land on the
+   checkpoint taken right where that rewind had settled - i.e. nowhere -
+   until pressed again. */
+#define REWIND_APPLY_DELAY_MS 800
+#define REWIND_MIN_BACK_FRAMES (3 * 60)
 
 typedef struct {
    void  *data;
@@ -1081,13 +1081,140 @@ typedef struct {
    int    frame_index;
 } PlaybackCheckpoint;
 
-static PlaybackCheckpoint s_pb_checkpoints[PLAYBACK_CHECKPOINT_COUNT];
-static int s_pb_checkpoint_count = 0;      /* how many ring slots are actually filled (grows to PLAYBACK_CHECKPOINT_COUNT, then stays there) */
-static int s_pb_checkpoint_next = 0;       /* ring write cursor - where the NEXT checkpoint will be written */
-static int s_pb_rewind_steps = 0;          /* 0 = at the live playback edge; N = loaded the checkpoint N steps before it */
-static int s_pb_last_checkpoint_frame = -1; /* frame_index() as of the last checkpoint (or session start) - -1 = no static playback session tracked yet */
-static DWORD s_pb_rewind_gesture_until = 0; /* 0 = no rewind gesture in progress; else the GetTickCount() deadline it expires at */
-static bool s_pb_virtual_rewind_request = false; /* one-shot flag set by the on-screen toolbar's Rewind button - see kailleraPlaybackRewindTick() */
+typedef struct {
+   PlaybackCheckpoint cp[CHECKPOINT_COUNT]; /* oldest first, frame_index ascending */
+   int count;
+   int last_frame; /* frame of the last capture (or the session's first frame); -1 = nothing seen yet */
+} CheckpointRing;
+
+/* Solo Playback/Watch Live vs the retry-connect host: mutually exclusive
+   modes, but with independent lifetimes (kailleraRetryConnectActive() vs "is
+   static Playback"), so each keeps its own ring. */
+static CheckpointRing s_pb_ring = { { { NULL, 0, 0 } }, 0, -1 };
+static CheckpointRing s_rc_ring = { { { NULL, 0, 0 } }, 0, -1 };
+
+/* The pending Rebobinar selection - only one mode is ever active. */
+static int   s_rw_steps = 0; /* checkpoints back from the current position; 0 = nothing pending */
+static DWORD s_rw_apply_at = 0;
+static bool  s_pb_virtual_rewind_request = false; /* one-shot flag set by the on-screen toolbar's Rewind button - see kailleraPlaybackRewindTick() */
+
+static void CheckpointRingReset(CheckpointRing *r) {
+   int i;
+   for (i = 0; i < r->count; i++)
+      free(r->cp[i].data);
+   memset(r, 0, sizeof(*r));
+   r->last_frame = -1;
+   s_rw_steps    = 0;
+   s_rw_apply_at = 0;
+}
+
+static void CheckpointRingMaybeCapture(CheckpointRing *r, int frame_index, int interval) {
+   size_t state_size;
+   void *state_buf;
+   retro_ctx_serialize_info_t info;
+
+   if (frame_index < 0)
+      return;
+   if (r->last_frame < 0) {
+      r->last_frame = frame_index; /* first frame seen this session - anchor from here, nothing to capture yet */
+      return;
+   }
+   if (frame_index - r->last_frame < interval)
+      return;
+
+   state_size = core_serialize_size();
+   if (state_size == 0 || (state_buf = malloc(state_size)) == NULL)
+      return;
+   info.data       = state_buf;
+   info.data_const = NULL;
+   info.size       = state_size;
+   if (!core_serialize(&info)) {
+      free(state_buf);
+      return;
+   }
+
+   /* Anything at or after this frame is a stretch we rewound past and are
+      now playing over again - drop it, so the ring stays in frame order. */
+   while (r->count > 0 && r->cp[r->count - 1].frame_index >= frame_index)
+      free(r->cp[--r->count].data);
+   if (r->count == CHECKPOINT_COUNT) {
+      free(r->cp[0].data);
+      memmove(&r->cp[0], &r->cp[1], sizeof(r->cp[0]) * (CHECKPOINT_COUNT - 1));
+      r->count--;
+   }
+   r->cp[r->count].data        = state_buf;
+   r->cp[r->count].size        = state_size;
+   r->cp[r->count].frame_index = frame_index;
+   r->count++;
+   r->last_frame = frame_index;
+}
+
+/* The `steps`-th checkpoint (1 = newest) at least REWIND_MIN_BACK_FRAMES
+   behind current_frame, or NULL if there aren't that many. */
+static PlaybackCheckpoint *CheckpointRingTarget(CheckpointRing *r, int current_frame, int steps) {
+   int i;
+   for (i = r->count - 1; i >= 0; i--) {
+      if (r->cp[i].data != NULL && r->cp[i].frame_index <= current_frame - REWIND_MIN_BACK_FRAMES && --steps == 0)
+         return &r->cp[i];
+   }
+   return NULL;
+}
+
+/* One press of Rebobinar (Left, or the toolbar button) - see
+   REWIND_APPLY_DELAY_MS for why this only selects. */
+static void RewindPress(CheckpointRing *r, int current_frame) {
+   PlaybackCheckpoint *cp = CheckpointRingTarget(r, current_frame, s_rw_steps + 1);
+   char msg[96];
+
+   if (cp != NULL)
+      s_rw_steps++;
+   else if (s_rw_steps == 0) {
+      runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      return;
+   } else
+      cp = CheckpointRingTarget(r, current_frame, s_rw_steps); /* already as far back as it goes - stay there */
+
+   s_rw_apply_at = GetTickCount() + REWIND_APPLY_DELAY_MS;
+   if (s_rw_apply_at == 0)
+      s_rw_apply_at = 1;
+   snprintf(msg, sizeof(msg), "Rebobinar: voltar %d s%s", (current_frame - cp->frame_index + 30) / 60,
+         CheckpointRingTarget(r, current_frame, s_rw_steps + 1) ? " (aperte de novo para voltar mais)" : " (o maximo)");
+   runloop_msg_queue_push(msg, 0, 90, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+}
+
+/* Loads the pending selection once the presses have stopped for
+   REWIND_APPLY_DELAY_MS - runs paused too. `apply` does the actual load and
+   returns false if it failed. */
+static void RewindTick(CheckpointRing *r, int current_frame, bool (*apply)(PlaybackCheckpoint *cp)) {
+   PlaybackCheckpoint *cp;
+   char msg[64];
+
+   if (s_rw_steps == 0 || (LONG)(GetTickCount() - s_rw_apply_at) < 0)
+      return;
+   cp = CheckpointRingTarget(r, current_frame, s_rw_steps);
+   s_rw_steps    = 0;
+   s_rw_apply_at = 0;
+   if (cp == NULL || !apply(cp))
+      return;
+   r->last_frame = cp->frame_index; /* periodic capture spacing resumes from here */
+   snprintf(msg, sizeof(msg), "Voltou %d s.", (current_frame - cp->frame_index + 30) / 60);
+   runloop_msg_queue_push(msg, 0, 90, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+}
+
+/* Solo Playback / Watch Live: load it and re-anchor the reader to its exact
+   frame. Deliberately doesn't touch pause state either way - keeps playing
+   right on if it was already running, and stays put if the user had paused
+   first to scrub through checkpoints. */
+static bool PlaybackApplyCheckpoint(PlaybackCheckpoint *cp) {
+   retro_ctx_serialize_info_t info;
+   info.data_const = cp->data;
+   info.data       = NULL;
+   info.size       = cp->size;
+   if (!core_unserialize(&info))
+      return false;
+   kailleraPlaybackSeekToFrame(cp->frame_index);
+   return true;
+}
 
 // Called by the on-screen playback toolbar's Rewind button (mouse click) -
 // consumed exactly like a real Left keypress by kailleraPlaybackRewindTick()
@@ -1097,187 +1224,45 @@ static void kailleraPlaybackRequestRewind(void) {
 }
 
 static void PlaybackRewindReset(void) {
-   int i;
-   for (i = 0; i < PLAYBACK_CHECKPOINT_COUNT; i++) {
-      free(s_pb_checkpoints[i].data);
-      s_pb_checkpoints[i].data = NULL;
-      s_pb_checkpoints[i].size = 0;
-   }
-   s_pb_checkpoint_count = 0;
-   s_pb_checkpoint_next = 0;
-   s_pb_rewind_steps = 0;
-   s_pb_last_checkpoint_frame = -1;
-   s_pb_rewind_gesture_until = 0;
+   CheckpointRingReset(&s_pb_ring);
 }
-
-// `force` bypasses the normal PLAYBACK_CHECKPOINT_INTERVAL_FRAMES spacing -
-// used once a rewind gesture (see above) has settled, to capture a fresh
-// checkpoint right where playback ended up instead of waiting out however
-// much of the normal ~10s interval happens to be left.
-static void PlaybackRewindMaybeCapture(int frame_index, bool force) {
-   size_t state_size;
-   void *state_buf;
-   retro_ctx_serialize_info_t info;
-   PlaybackCheckpoint *slot;
-
-   if (s_pb_last_checkpoint_frame < 0) {
-      s_pb_last_checkpoint_frame = frame_index; /* first frame seen this session - anchor from here, nothing to capture yet */
-      return;
-   }
-   if (!force && frame_index - s_pb_last_checkpoint_frame < PLAYBACK_CHECKPOINT_INTERVAL_FRAMES)
-      return;
-
-   if (force && s_pb_rewind_steps > 0) {
-      // We're branching forward from a rewound point (s_pb_rewind_steps
-      // checkpoints back from the write cursor) - anything strictly newer
-      // than that point (the s_pb_rewind_steps-1 entries between it and the
-      // write cursor) describes a future that no longer happened once
-      // playback continued differently from here. Drop them and rewind the
-      // write cursor to right after our current spot, so what gets written
-      // below becomes the new "most recent" entry instead of landing
-      // wherever forward-only progress had last reached - otherwise a step
-      // further back can land on something NEWER than a step closer in,
-      // since the ring would still hold that stale, now-invalid future.
-      int discard = s_pb_rewind_steps - 1;
-      s_pb_checkpoint_next = (s_pb_checkpoint_next - discard + PLAYBACK_CHECKPOINT_COUNT * 2) % PLAYBACK_CHECKPOINT_COUNT;
-      s_pb_checkpoint_count -= discard;
-   }
-
-   state_size = core_serialize_size();
-   if (state_size == 0)
-      return;
-   state_buf = malloc(state_size);
-   if (state_buf == NULL)
-      return;
-   info.data       = state_buf;
-   info.data_const = NULL;
-   info.size       = state_size;
-   if (!core_serialize(&info)) {
-      free(state_buf);
-      return;
-   }
-
-   slot = &s_pb_checkpoints[s_pb_checkpoint_next];
-   free(slot->data);
-   slot->data        = state_buf;
-   slot->size        = state_size;
-   slot->frame_index = frame_index;
-
-   s_pb_checkpoint_next = (s_pb_checkpoint_next + 1) % PLAYBACK_CHECKPOINT_COUNT;
-   if (s_pb_checkpoint_count < PLAYBACK_CHECKPOINT_COUNT)
-      s_pb_checkpoint_count++;
-   s_pb_rewind_steps = 0; /* real forward progress happened - any earlier rewind is now old news */
-   s_pb_last_checkpoint_frame = frame_index;
-}
-
-/* Checkpoint-based rewind for retry-connect's group replay - host-only
-   (only the host navigates; a peer's own view is always overwritten by the
-   host's next broadcast anyway, same reasoning as the FF handoff). Mirrors
-   the solo-Playback ring above (same interval/count, same core_serialize()
-   capture), but kept as its own separate ring rather than sharing
-   s_pb_checkpoints - the two modes are mutually exclusive but have
-   independent lifetimes (kailleraRetryConnectActive() vs "is static
-   Playback"), and the rewind here has to broadcast to every peer afterward
-   (kailleraRetryConnectSeekLocal() + kailleraRetryConnectUploadState()) while
-   solo Playback's stays purely local - simplest to keep them from ever being
-   able to interfere with each other. */
-#define RC_CHECKPOINT_INTERVAL_FRAMES 600 /* ~10s at 60fps, same spacing as solo Playback */
-#define RC_CHECKPOINT_COUNT 10
-static PlaybackCheckpoint s_rc_checkpoints[RC_CHECKPOINT_COUNT];
-static int s_rc_checkpoint_count = 0;
-static int s_rc_checkpoint_next = 0;
-static int s_rc_last_checkpoint_frame = -1;
 
 static void RetryConnectCheckpointReset(void) {
-   int i;
-   for (i = 0; i < RC_CHECKPOINT_COUNT; i++) {
-      free(s_rc_checkpoints[i].data);
-      s_rc_checkpoints[i].data = NULL;
-      s_rc_checkpoints[i].size = 0;
-   }
-   s_rc_checkpoint_count = 0;
-   s_rc_checkpoint_next = 0;
-   s_rc_last_checkpoint_frame = -1;
+   CheckpointRingReset(&s_rc_ring);
 }
 
 static void RetryConnectCheckpointMaybeCapture(int frame_index) {
-   size_t state_size;
-   void *state_buf;
-   retro_ctx_serialize_info_t info;
-   PlaybackCheckpoint *slot;
-
-   if (s_rc_last_checkpoint_frame < 0) {
-      s_rc_last_checkpoint_frame = frame_index;
-      return;
-   }
-   if (frame_index - s_rc_last_checkpoint_frame < RC_CHECKPOINT_INTERVAL_FRAMES)
-      return;
-
-   state_size = core_serialize_size();
-   if (state_size == 0)
-      return;
-   state_buf = malloc(state_size);
-   if (state_buf == NULL)
-      return;
-   info.data       = state_buf;
-   info.data_const = NULL;
-   info.size       = state_size;
-   if (!core_serialize(&info)) {
-      free(state_buf);
-      return;
-   }
-
-   slot = &s_rc_checkpoints[s_rc_checkpoint_next];
-   free(slot->data);
-   slot->data        = state_buf;
-   slot->size        = state_size;
-   slot->frame_index = frame_index;
-
-   s_rc_checkpoint_next = (s_rc_checkpoint_next + 1) % RC_CHECKPOINT_COUNT;
-   if (s_rc_checkpoint_count < RC_CHECKPOINT_COUNT)
-      s_rc_checkpoint_count++;
-   s_rc_last_checkpoint_frame = frame_index;
+   CheckpointRingMaybeCapture(&s_rc_ring, frame_index, RC_CHECKPOINT_INTERVAL_FRAMES);
 }
 
-/* Host-only: restores the newest checkpoint strictly before the current
-   position, locally (core_unserialize() + kailleraRetryConnectSeekLocal()),
-   then re-uses the existing kailleraRetryConnectUploadState() hand-off to
-   broadcast it - every peer converges via the SAME already-working
-   RC_ACTION_STATE_READY path a normal Pause already uses, no peer-side
-   changes needed. No-op if there's nothing earlier to rewind to. */
-static void RetryConnectRequestRewind(void) {
-   int current_frame, i, best_frame = -1, target = -1;
+/* Retry-connect host: load locally (core_unserialize() +
+   kailleraRetryConnectSeekLocal()), then re-use the existing
+   kailleraRetryConnectUploadState() hand-off to broadcast it - every peer
+   converges via the SAME RC_ACTION_STATE_READY path a normal Pause already
+   uses, no peer-side changes needed. */
+static bool RetryConnectApplyCheckpoint(PlaybackCheckpoint *cp) {
+   retro_ctx_serialize_info_t info;
+   if (!kailleraRetryConnectCanControl())
+      return false;
+   info.data_const = cp->data;
+   info.data       = NULL;
+   info.size       = cp->size;
+   if (!core_unserialize(&info))
+      return false;
+   kailleraRetryConnectSeekLocal(cp->frame_index);
+   kailleraRetryConnectUploadState(cp->data, (int)cp->size);
+   return true;
+}
 
+/* Host-only: the toolbar's Rebobinar in retry-connect - same select-then-
+   apply flow as solo Playback's (applied by kailleraRetryConnectToolbarTick()). */
+static void RetryConnectRequestRewind(void) {
+   int current_frame;
    if (!kailleraRetryConnectCanControl())
       return;
    current_frame = kailleraRetryConnectGetFrameIndex();
-   if (current_frame < 0)
-      return;
-
-   for (i = 0; i < s_rc_checkpoint_count; i++) {
-      PlaybackCheckpoint *cp = &s_rc_checkpoints[i];
-      if (cp->data != NULL && cp->frame_index < current_frame && cp->frame_index > best_frame) {
-         best_frame = cp->frame_index;
-         target = i;
-      }
-   }
-   if (target < 0) {
-      runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
-      return;
-   }
-
-   {
-      PlaybackCheckpoint *cp = &s_rc_checkpoints[target];
-      retro_ctx_serialize_info_t info;
-      info.data_const = cp->data;
-      info.data       = NULL;
-      info.size       = cp->size;
-      if (!core_unserialize(&info))
-         return;
-      kailleraRetryConnectSeekLocal(cp->frame_index);
-      kailleraRetryConnectUploadState(cp->data, (int)cp->size);
-      s_rc_last_checkpoint_frame = cp->frame_index; /* periodic capture spacing resumes from here */
-   }
+   if (current_frame >= 0)
+      RewindPress(&s_rc_ring, current_frame);
 }
 
 /* On-screen mouse-clickable control toolbar for solo "Reproducao de Replay" -
@@ -2018,60 +2003,21 @@ void kailleraPlaybackRewindTick(void) {
 
    now = GetTickCount();
 
-   /* A rewind gesture that's gone quiet (no Left press for
-      PLAYBACK_REWIND_GESTURE_MS) means the user has moved on from wherever
-      they landed - capture a checkpoint right there (bypassing the normal
-      ~10s spacing) and close the gesture, so the NEXT Left press counts
-      from zero relative to HERE instead of stacking onto however many steps
-      were taken before. Without this, briefly resuming play for only a
-      couple of seconds and then rewinding again would jump back much
-      further than expected, relative to the ORIGINAL live edge rather than
-      to this recent point. */
-   if (s_pb_rewind_gesture_until != 0 && (LONG)(now - s_pb_rewind_gesture_until) >= 0) {
-      PlaybackRewindMaybeCapture(frame_index, true);
-      s_pb_rewind_steps = 0;
-      s_pb_rewind_gesture_until = 0;
-   } else {
-      PlaybackRewindMaybeCapture(frame_index, false);
-   }
+   CheckpointRingMaybeCapture(&s_pb_ring, frame_index, PLAYBACK_CHECKPOINT_INTERVAL_FRAMES);
 
-   left_pressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) ? true : false;
+   /* Rebobinar: Left or the toolbar button - see RewindPress(). Left only
+      counts with RetroArch's own window in front, same as Enter above: the
+      Kaillera dialogs share this process, and moving the cursor in their chat
+      box must not rewind. */
+   left_pressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) && GetForegroundWindow() == win32_get_window();
    {
       bool left_triggered = (left_pressed && !old_left_pressed) || s_pb_virtual_rewind_request;
       s_pb_virtual_rewind_request = false;
       old_left_pressed = left_pressed;
-      left_pressed = left_triggered; /* repurpose for the trigger check below - real edge OR the toolbar's one-shot request */
+      if (left_triggered)
+         RewindPress(&s_pb_ring, frame_index);
    }
-   if (left_pressed) {
-      if (s_pb_rewind_gesture_until == 0)
-         s_pb_rewind_steps = 0; /* fresh gesture, not a rapid repeat of a previous one - don't stack on old steps */
-
-      if (s_pb_rewind_steps < s_pb_checkpoint_count) {
-         int idx;
-         PlaybackCheckpoint *cp;
-         retro_ctx_serialize_info_t info;
-
-         s_pb_rewind_steps++;
-         idx = (s_pb_checkpoint_next - s_pb_rewind_steps + PLAYBACK_CHECKPOINT_COUNT * 2) % PLAYBACK_CHECKPOINT_COUNT;
-         cp = &s_pb_checkpoints[idx];
-
-         info.data_const = cp->data;
-         info.data       = NULL;
-         info.size       = cp->size;
-         core_unserialize(&info);
-         kailleraPlaybackSeekToFrame(cp->frame_index);
-         /* Deliberately doesn't touch pause state either way - keeps
-            playing right on if it was already running (no need to hit
-            Resume after every rewind tap), and stays put if the user had
-            paused first to scrub through checkpoints one at a time. */
-
-         s_pb_rewind_gesture_until = now + PLAYBACK_REWIND_GESTURE_MS;
-         if (s_pb_rewind_gesture_until == 0)
-            s_pb_rewind_gesture_until = 1;
-      } else {
-         runloop_msg_queue_push("Nao posso voltar mais do que isso ;(", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
-      }
-   }
+   RewindTick(&s_pb_ring, frame_index, PlaybackApplyCheckpoint);
 
    /* "Ir direto para o Ao Vivo!" - countdown and result of a PB_BTN_GOLIVE
       click (see the toolbar's WM_LBUTTONDOWN handler above). Bounded by
@@ -2517,6 +2463,8 @@ void kailleraRetryConnectToolbarTick(void) {
       bool paused = (runloop_st->flags & RUNLOOP_FLAG_PAUSED) ? true : false;
       if (!paused)
          RetryConnectCheckpointMaybeCapture(kailleraRetryConnectGetFrameIndex());
+      /* Applies a pending Rebobinar selection - see RewindPress(). */
+      RewindTick(&s_rc_ring, kailleraRetryConnectGetFrameIndex(), RetryConnectApplyCheckpoint);
    }
 #endif
 }
