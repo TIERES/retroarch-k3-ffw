@@ -1538,6 +1538,17 @@ static bool GoLiveEnabled(void) {
    return IsWatchLive() && !s_watch_golive_pending && !kailleraWatchGoLiveLocked();
 }
 
+/* "Ir ao vivo!" - the toolbar button and Enter (see
+   kailleraPlaybackRewindTick()) do exactly the same thing. */
+static void WatchGoLiveRequest(void) {
+   if (!IsWatchLive() || s_watch_golive_pending)
+      return;
+   if (kailleraWatchGoLiveLocked())
+      runloop_msg_queue_push("Voce ja esta ao vivo - aperte Pause ou Rebobinar para liberar o \"Ir ao vivo!\" de novo.", 0, 120, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+   else if (!WatchGoLiveStart())
+      runloop_msg_queue_push("Nao foi possivel pedir o sync ao vivo agora - tente de novo em instantes.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+}
+
 static void PlaybackToolbarPaint(HWND hwnd) {
    PAINTSTRUCT ps;
    HDC dc;
@@ -1720,11 +1731,8 @@ static LRESULT CALLBACK PlaybackToolbarWndProc(HWND hwnd, UINT msg, WPARAM wp, L
             PlaybackSetFastForward(!(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION));
          } else if (idx == PB_BTN_STOP) {
             kailleraPlaybackStop();
-         } else if (idx == PB_BTN_GOLIVE && IsWatchLive() && !s_watch_golive_pending && kailleraWatchGoLiveLocked()) {
-            runloop_msg_queue_push("Voce ja esta ao vivo - aperte Pause ou Rebobinar para liberar o \"Ir ao vivo!\" de novo.", 0, 120, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
-         } else if (idx == PB_BTN_GOLIVE && GoLiveEnabled()) {
-            if (!WatchGoLiveStart())
-               runloop_msg_queue_push("Nao foi possivel pedir o sync ao vivo agora - tente de novo em instantes.", 0, 90, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
+         } else if (idx == PB_BTN_GOLIVE) {
+            WatchGoLiveRequest();
          }
          InvalidateRect(hwnd, NULL, FALSE);
       }
@@ -1994,6 +2002,19 @@ void kailleraPlaybackRewindTick(void) {
    if (esc_pressed && !old_esc_pressed)
       kailleraPlaybackStop();
    old_esc_pressed = esc_pressed;
+
+   /* Enter = "Ir ao vivo!" in Watch Live, as the button's tooltip (shared
+      with retry-connect's Selecionar) always said. Only with RetroArch's own
+      window in front: the Kaillera dialogs live in this same process, and
+      Enter to send a chat line there must not jump the spectator. */
+   {
+      static bool old_enter_pressed = false;
+      bool enter_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000)
+         && GetForegroundWindow() == win32_get_window();
+      if (enter_pressed && !old_enter_pressed)
+         WatchGoLiveRequest(); /* no-op outside Watch Live */
+      old_enter_pressed = enter_pressed;
+   }
 
    now = GetTickCount();
 
