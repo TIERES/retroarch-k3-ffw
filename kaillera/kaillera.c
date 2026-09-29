@@ -2320,6 +2320,35 @@ static void DispatchRetryConnectAction(int action) {
 #define RETRYCONNECT_PEER_INITIAL_PLAY_MS 5000
 static DWORD s_peer_initial_pause_deadline = 0;
 
+/* The host must not play the group replay to its very end: past the last
+   recorded frame there's no match left to resume (kaillera-client just
+   repeats the final input), a replay usually ends exactly where the original
+   match died - which can mean the same core crash all over again - and the
+   peers sit paused waiting on the host the whole time. So the host
+   auto-pauses this many frames before the end (exactly like pressing Pause:
+   stops fast-forward, syncs everyone to this frame), and again on every try
+   to play on from inside that stretch - only Rebobinar or Selecionar (go
+   live) get out of it. ~30s at 60fps. */
+#define RETRYCONNECT_END_GUARD_FRAMES (30 * 60)
+
+static void RetryConnectEndGuardTick(void) {
+   int total, frame_index;
+
+   /* After go-live kaillera-client ends the replay phase, and with it the
+      host's control - so this never touches the live match. */
+   if (!kailleraRetryConnectCanControl() || s_rc_seq != RC_SEQ_NONE)
+      return;
+   if (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_PAUSED)
+      return;
+   total       = kailleraRetryConnectGetTotalFrames();
+   frame_index = kailleraRetryConnectGetFrameIndex();
+   if (total <= 0 || frame_index < 0 || total - frame_index > RETRYCONNECT_END_GUARD_FRAMES)
+      return;
+
+   RetryConnectTogglePause(); /* not paused (checked above), so this pauses and sends the state */
+   runloop_msg_queue_push("Voce chegou no fim da linha, rebobine ou reinicie a partida agora!", 1, 8 * 60, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+}
+
 void kailleraRetryConnectFrameTick() {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
@@ -2354,6 +2383,8 @@ void kailleraRetryConnectFrameTick() {
       initial unpaused free-play window above - see TickRetryConnectSequence()'s
       own doc comment. */
    TickRetryConnectSequence();
+
+   RetryConnectEndGuardTick();
 
    if (kailleraRetryConnectPollF == NULL)
       return;
