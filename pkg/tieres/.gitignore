@@ -1,3 +1,4 @@
-# O .gitignore da raiz ignora qualquer pasta "config" (pasta de usuario do RetroArch).
-# Aqui elas sao os arquivos do pacote TIERES e precisam ser versionadas.
+# O .gitignore da raiz ignora qualquer pasta "config" e qualquer retroarch.cfg
+# (arquivos de usuario do RetroArch). Aqui eles sao o pacote TIERES e sao versionados.
 !config/
+!retroarch.cfg
