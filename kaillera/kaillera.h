@@ -51,6 +51,9 @@ void GetClientVersion(char* version);
 void AddGamesToList();
 void kMessage_core_info();
 void kailleraChatSendExternal(const char* messge);
+/* Memory Card online - the DLL's optional kailleraMemcardPrepare(), or -2
+   when the loaded DLL doesn't have it. See kaillera.c. */
+int kailleraMemcardPrepareExternal(const char* contentId, const char* gameFile, const char* dir);
 void cp1251_to_utf8(char* out, const char* in);
 extern bool kailleraNetplay;
 extern bool kailleraInitialised;

@@ -57,6 +57,8 @@ char* kailleraGames;
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
 extern int (WINAPI* kailleraIsPlaybackModeF)();
 extern int (WINAPI* kailleraGetNoMemoryCardF)();
+extern int (WINAPI* kailleraGetMultiTapF)();
+extern int (WINAPI* kailleraGetMemcardModeF)();
 #endif
 
 
@@ -84,11 +86,18 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
       loading content - resets the anti-desync handshake/BIOS capture. */
    {
       bool no_memcard = true;
+      bool multitap   = false;
+      int memcard_mode = KSYNC_MEMCARD_NONE;
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
       if (kailleraGetNoMemoryCardF != NULL)
          no_memcard = kailleraGetNoMemoryCardF() != 0;
+      if (kailleraGetMultiTapF != NULL)
+         multitap = kailleraGetMultiTapF() != 0;
+      if (kailleraGetMemcardModeF != NULL)
+         memcard_mode = kailleraGetMemcardModeF();
 #endif
-      kailleraSyncGameBegin(kNumPlayers, kailleraPlaybackMode, no_memcard);
+      kailleraSyncGameBegin(kNumPlayers, kailleraPlaybackMode, no_memcard,
+            multitap, memcard_mode);
    }
 
    settings->bools.preemptive_frames_enable = false;
@@ -97,6 +106,12 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
 
    for (int n = 0; n < MAX_INPUTS; n++)
       players[n].playerNumber = n;
+
+   /* With a multitap the core also reads the pads nobody plays (e.g. 1D in
+      a 3-player game) - those slots must start neutral on every machine, not
+      keep whatever the previous game (say, with 4 players) left in them. */
+   memset(joy, 0, sizeof(joy));
+   memset(netjoy_ex, 0, sizeof(netjoy_ex));
 
    fname = kailleraRomNames;
 
@@ -351,6 +366,31 @@ int (WINAPI* kailleraIsPlaybackModeF)();
    older DLLs, which means "no memory card" like before the checkbox existed. */
 int (WINAPI* kailleraGetNoMemoryCardF)();
 
+/* The room's "MultiTap" checkbox (kaillera-client) - optional, NULL on older
+   DLLs, which means "no multitap" like before the checkbox existed. */
+int (WINAPI* kailleraGetMultiTapF)();
+
+/* Memory Card online (kaillera-client + wg-camp) - optional, NULL on older
+   DLLs (= the room's "Sem M. Card" choice is all there is).
+   kailleraGetMemcardMode: KSYNC_MEMCARD_NONE / _OWN / _ONLINE.
+   kailleraMemcardPrepare(contentId, gameFile, dir): writes the match's two
+   cards as dir\pcsx-card1.mcd (1P) and dir\pcsx-card2.mcd (2P); 1 = ready,
+   0 = not an online-card game, < 0 = failed.
+   kailleraMemcardFinish(): called once the core is unloaded (its card files
+   closed) - the DLL sends the final cards back to wg-camp. */
+int (WINAPI* kailleraGetMemcardModeF)();
+int (WINAPI* kailleraMemcardPrepareF)(const char* contentId, const char* gameFile, const char* dir);
+void (WINAPI* kailleraMemcardFinishF)();
+
+int kailleraMemcardPrepareExternal(const char* contentId, const char* gameFile, const char* dir)
+{
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   if (kailleraMemcardPrepareF != NULL)
+      return kailleraMemcardPrepareF(contentId, gameFile, dir);
+#endif
+   return -2;
+}
+
 /* retry-connect - optional, same GetProcAddress-if-present convention as
    kailleraIsPlaybackModeF above. See kaillera.h. */
 int (WINAPI* kailleraRetryConnectCanControlF)();
@@ -407,6 +447,10 @@ void CloseKaillera() {
 
    kailleraIsPlaybackModeF                 = NULL;
    kailleraGetNoMemoryCardF                = NULL;
+   kailleraGetMultiTapF                    = NULL;
+   kailleraGetMemcardModeF                 = NULL;
+   kailleraMemcardPrepareF                 = NULL;
+   kailleraMemcardFinishF                  = NULL;
    kailleraRetryConnectCanControlF         = NULL;
    kailleraRetryConnectNotifyLocalControlF = NULL;
    kailleraRetryConnectPollF               = NULL;
@@ -694,6 +738,10 @@ void LoadKaillera() {
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraEndGame");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraIsPlaybackMode");
       kailleraGetNoMemoryCardF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraGetNoMemoryCard");
+      kailleraGetMultiTapF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraGetMultiTap");
+      kailleraGetMemcardModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraGetMemcardMode");
+      kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "kailleraMemcardPrepare");
+      kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraMemcardFinish");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
@@ -725,6 +773,10 @@ void LoadKaillera() {
       kailleraEndGameF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraEndGame@0");
       kailleraIsPlaybackModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraIsPlaybackMode@0");
       kailleraGetNoMemoryCardF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraGetNoMemoryCard@0");
+      kailleraGetMultiTapF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraGetMultiTap@0");
+      kailleraGetMemcardModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraGetMemcardMode@0");
+      kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "_kailleraMemcardPrepare@12");
+      kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraMemcardFinish@0");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");
@@ -2494,6 +2546,12 @@ void EndKailleraGame() {
       kailleraEndGameF();
 #endif
       command_event(CMD_EVENT_CLOSE_CONTENT, NULL);
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+      /* Core unloaded, card files closed: the DLL can send the online
+         memory cards back (no-op for any other game). */
+      if (kailleraMemcardFinishF != NULL)
+         kailleraMemcardFinishF();
+#endif
    }
 }
 

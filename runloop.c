@@ -2023,6 +2023,9 @@ bool runloop_environment_cb(unsigned cmd, void *data)
       case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
          RARCH_LOG("[Environ]: GET_SAVE_DIRECTORY.\n");
          *(const char**)data = runloop_st->savefile_dir;
+         /* Memory Card online: the match's own folder with both cards. */
+         if (kailleraSyncSaveDirectory())
+            *(const char**)data = kailleraSyncSaveDirectory();
          break;
 
       case RETRO_ENVIRONMENT_GET_USERNAME:
@@ -7036,6 +7039,9 @@ int runloop_iterate(void)
    if (kailleraInitialisedInternal & !stop_execute_shit)
    {
       stop_execute_shit++;
+      /* Before the core loads: it reads its save directory/memory card
+         options while loading the game. */
+      kailleraSyncPrepareMemcards(fname, cpath);
       if (load_content_and_core()) {
          kMessage_core_info();
       } else EndKailleraGame();
