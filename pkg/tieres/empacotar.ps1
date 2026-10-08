@@ -8,8 +8,8 @@
     RetroArch-TIERES-Graficos-PS1.zip
 
   Com -Pasta (a pasta da versao, a mesma do retroarch.exe), tambem:
-    1. copia comum\ e graficos\<padrao>\config\ para dentro da pasta, e apaga de
-       la os arquivos de config dos outros pacotes de graficos (ex.: o .slangp do PS1);
+    1. copia comum\, versao\ e graficos\<padrao>\config\ para dentro da pasta, e apaga
+       de la os arquivos de config dos outros pacotes de graficos (ex.: o .slangp do PS1);
     2. gera <pasta>.light.zip;
     3. gera <pasta>.zip (pule com -SemCompleto).
 
@@ -34,13 +34,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 # Grafico que vai dentro de toda versao (completa e light).
 $GraficoPadrao = 'Casanova'
 
-# Arquivos da versao light, alem dos de comum\ e do grafico padrao.
-$LightObrigatorios = 'retroarch.exe', 'retroarch.cfg', 'kailleraclient.dll', 'cores/pcsx_rearmed_libretro.dll'
+# Arquivos da versao light, alem dos de comum\, versao\ e do grafico padrao.
+$LightObrigatorios = 'retroarch.exe', 'kailleraclient.dll', 'cores/pcsx_rearmed_libretro.dll'
 # Trava do nucleo: impede o Online Updater de trocar o nucleo TIERES pelo oficial.
 $LightOpcionais    = 'cores/pcsx_rearmed_libretro.dll.lck'
 
 $Raiz     = $PSScriptRoot
-$Comum    = Join-Path $Raiz 'comum'
+$Comum    = Join-Path $Raiz 'comum'     # versao + pacotes de graficos
+$Versao   = Join-Path $Raiz 'versao'    # so versao (completa e light)
 $Graficos = Join-Path $Raiz 'graficos'
 
 # Arquivos de $Dir como @{ Origem; Nome }, com Nome relativo usando '/'.
@@ -77,6 +78,12 @@ $pacotes = @(Get-ChildItem -LiteralPath $Graficos -Directory | Sort-Object Name)
 if (-not ($pacotes.Name -contains $GraficoPadrao)) { throw "Grafico padrao nao encontrado: graficos\$GraficoPadrao" }
 $padraoConfig = Join-Path $Graficos "$GraficoPadrao\config"
 
+# O RetroArch regrava o .cfg ao fechar com caminhos da maquina (ex.: cache_directory
+# no TEMP do usuario). Na pasta do jogador eles nao existem; use :\ (pasta do retroarch.exe).
+$absolutos = @(Get-ChildItem -LiteralPath $Raiz -Recurse -File | Where-Object Extension -in '.cfg', '.opt' |
+    Select-String -Pattern '= "[A-Za-z]:[\\/]')
+if ($absolutos) { throw "Caminho absoluto em $($absolutos[0].Path):$($absolutos[0].LineNumber): $($absolutos[0].Line)" }
+
 if ($Pasta) {
     $Pasta = (Resolve-Path -LiteralPath $Pasta).Path.TrimEnd('\')
     $nome  = Split-Path $Pasta -Leaf
@@ -86,9 +93,9 @@ if ($Pasta) {
         if (-not (Test-Path -LiteralPath (Join-Path $Pasta $f))) { throw "Falta na pasta da versao: $f" }
     }
 
-    $versao = (Select-String -LiteralPath (Join-Path $Raiz '..\..\version.all') -Pattern 'RARCH_VERSION="(.+)"').Matches[0].Groups[1].Value
-    $esperado = 'RetroArch-' + ($versao -replace '\.K\.', '.')
-    if ($nome -ne $esperado) { Write-Warning "Pasta '$nome' nao bate com version.all ($versao -> '$esperado')." }
+    $numero = (Select-String -LiteralPath (Join-Path $Raiz '..\..\version.all') -Pattern 'RARCH_VERSION="(.+)"').Matches[0].Groups[1].Value
+    $esperado = 'RetroArch-' + ($numero -replace '\.K\.', '.')
+    if ($nome -ne $esperado) { Write-Warning "Pasta '$nome' nao bate com version.all ($numero -> '$esperado')." }
 }
 if (-not $Saida) { throw 'Informe -Pasta (versao completa) ou -Saida (so os graficos).' }
 $Saida = (Resolve-Path -LiteralPath $Saida).Path
@@ -106,12 +113,16 @@ if (-not $Pasta) { return }
 # --- aplica o padrao na pasta da versao -------------------------------------
 
 Write-Host "Aplicando graficos '$GraficoPadrao' em ${Pasta}:"
-$padrao = @(Get-Itens $Comum) + @(Get-Itens $padraoConfig 'config/')
+$padrao = @(Get-Itens $Comum) + @(Get-Itens $Versao) + @(Get-Itens $padraoConfig 'config/')
 foreach ($i in $padrao) {
-    $alvo = Join-Path $Pasta $i.Nome.Replace('/', '\')
+    $alvo   = Join-Path $Pasta $i.Nome.Replace('/', '\')
+    $estado = 'novo'
+    if (Test-Path -LiteralPath $alvo) {
+        $estado = if ((Get-FileHash -LiteralPath $alvo).Hash -eq (Get-FileHash -LiteralPath $i.Origem).Hash) { 'igual' } else { 'substituido' }
+    }
     New-Item -ItemType Directory -Force -Path (Split-Path $alvo) | Out-Null
     Copy-Item -LiteralPath $i.Origem -Destination $alvo -Force
-    Write-Host "  $($i.Nome)"
+    Write-Host "  $($i.Nome) ($estado)"
 }
 
 # Sobras de outro pacote de graficos testado nesta pasta (ex.: PCSX-ReARMed.slangp do PS1).
