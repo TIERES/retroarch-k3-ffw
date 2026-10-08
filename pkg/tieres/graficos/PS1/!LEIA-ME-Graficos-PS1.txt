@@ -1,0 +1,47 @@
+﻿GRAFICOS MELHORES PARA PLAYSTATION - RetroArch TIERES
+======================================================
+
+COMO INSTALAR
+  1. Feche o RetroArch.
+  2. Extraia este .zip DENTRO da pasta do RetroArch
+     (RetroArch-1.16.0.FFW.TIERES.0.x, a mesma pasta do retroarch.exe).
+     No "Extrair Tudo" do Windows, apague o final do caminho que o
+     Windows acrescenta ("\RetroArch-TIERES-Graficos-PS1").
+     Se o Windows perguntar, escolha "Substituir".
+  3. Abra o RetroArch e jogue normalmente.
+
+  Seus controles e demais configurações continuam como estavam.
+
+O QUE MUDA (só no PlayStation)
+  - O jogo abre em tela cheia, na resolução real do monitor.
+    Antes a imagem era feita em 1366x768 e o Windows esticava.
+  - Filtro SMAA + FSR: tira o serrilhado dos jogadores e deixa a
+    imagem nítida em Full HD.
+  - Não mexe no jogo nem na sincronia. Dá para jogar online com
+    quem não instalou.
+
+TELA CHEIA / JANELA
+  Tecla F alterna entre tela cheia e janela.
+
+TROCAR O FILTRO (durante o jogo)
+  F1 > Menu rápido > Sombreadores > Carregar > shaders_slang > ...
+    edge-smoothing\fsr\smaa+fsr ............... padrão, visual moderno
+    pixel-art-scaling\sharp-bilinear-simple ... pixels nítidos, mais retrô
+    edge-smoothing\xbrz\xbrz-freescale ........ bem nítido
+    crt\crt-easymode .......................... TV de tubo, leve
+    crt\crt-guest-advanced .................... TV de tubo, completo
+  Para desligar: F1 > Menu rápido > Sombreadores > Sombreadores de vídeo.
+
+IMAGEM NA PROPORÇÃO ORIGINAL (4:3, com faixas pretas nas laterais)
+  F1 > Configurações > Vídeo > Escala > Proporção da tela > 4:3
+
+PC FRACO / VÍDEO INTEGRADO
+  Se o jogo ficar lento, apague o arquivo
+  config\PCSX-ReARMed\PCSX-ReARMed.slangp
+  (fica sem filtro, mas a tela cheia continua na resolução real).
+
+DESINSTALAR
+  Apague:
+    config\PCSX-ReARMed\PCSX-ReARMed.cfg
+    config\PCSX-ReARMed\PCSX-ReARMed.slangp
+    a pasta shaders\shaders_slang

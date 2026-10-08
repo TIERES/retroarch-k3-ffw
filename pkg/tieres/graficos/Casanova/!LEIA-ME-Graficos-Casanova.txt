@@ -1,0 +1,46 @@
+﻿GRAFICOS PARA PLAYSTATION - ESTILO CASANOVA - RetroArch TIERES
+===============================================================
+
+Visual igual ao do antigo RetroArch Casanova: Resolução Aprimorada,
+imagem suavizada (filtro bilinear) e sem filtros (shaders).
+Leve: não pesa nada na placa de vídeo, roda até em PC antigo.
+
+COMO INSTALAR
+  1. Feche o RetroArch.
+  2. Extraia este .zip DENTRO da pasta do RetroArch
+     (RetroArch-1.16.0.FFW.TIERES.0.x, a mesma pasta do retroarch.exe).
+     No "Extrair Tudo" do Windows, apague o final do caminho que o
+     Windows acrescenta ("\RetroArch-TIERES-Graficos-Casanova").
+     Se o Windows perguntar, escolha "Substituir".
+  3. Abra o RetroArch e jogue normalmente.
+
+  Seus controles continuam como estavam. As opções do núcleo do
+  PlayStation voltam ao padrão do pacote TIERES (igual acontece ao
+  atualizar com a versão light), com o ajuste que tira as listras
+  brancas do gramado.
+  Se você tinha instalado outro pacote de gráficos, este o substitui
+  e desliga os filtros (shaders) dele.
+
+O QUE MUDA (só no PlayStation)
+  - Resolução Aprimorada ligada: o jogo é desenhado em resolução
+    dobrada, com mais detalhes nos jogadores, na rede e nas linhas.
+  - Imagem suavizada (bilinear), sem os "quadradinhos" dos pixels.
+  - Sem as listras brancas no gramado: o "Enhanced Resolution Texture
+    Adjustment" fica desligado (ele causa essas listras no WE).
+  - Filtros (shaders) desligados.
+  - Na tela cheia, a imagem usa a resolução real do monitor.
+    Antes ela era feita em 1366x768 e o Windows esticava.
+  - Não mexe no jogo nem na sincronia. Dá para jogar online com
+    quem não instalou.
+
+SE AINDA FICAR PIXELADO
+  Com o jogo aberto, confira:
+  F1 > Opções do núcleo > GPU Plugin >
+  "(GPU) Enhanced Resolution" = enabled
+
+TELA CHEIA / JANELA
+  Tecla F alterna entre tela cheia e janela.
+
+DESINSTALAR
+  Apague o arquivo config\PCSX-ReARMed\PCSX-ReARMed.cfg
+  (as opções do núcleo ficam no padrão do pacote)

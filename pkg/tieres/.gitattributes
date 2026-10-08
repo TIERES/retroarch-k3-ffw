@@ -1,0 +1,3 @@
+# Arquivos do pacote vao byte a byte para os zips (LEIA-ME em CRLF com BOM,
+# .cfg/.opt em LF, shaders como vieram do slang-shaders). Sem conversao de fim de linha.
+* -text
