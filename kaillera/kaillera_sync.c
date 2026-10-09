@@ -117,6 +117,8 @@ static const struct
    { "pcsx_rearmed_nocdaudio",            "enabled"  },
    { "pcsx_rearmed_spu_reverb",           "enabled"  },
    { "pcsx_rearmed_frameskip_type",       "disabled" },
+   /* Placeholders - the real value depends on the game's player count and
+      the room's "MultiTap" checkbox, see ksync_forced_value(). */
    { "pcsx_rearmed_multitap",             "disabled" },
    { "pcsx_rearmed_multitap1",            "disabled" },
    { "pcsx_rearmed_multitap2",            "disabled" },
@@ -199,6 +201,18 @@ static volatile unsigned   ksync_gen;
 static int                 ksync_num_players;
 static bool                ksync_playback;
 static bool                ksync_no_memcard = true; /* room's "Sem M. Card" */
+/* PSX Multitap ports for this game: 0 = none, 1 = port 1 (3-4 players),
+   2 = ports 1 and 2 (5-8 players) - see kailleraSyncGameBegin(). */
+static int                 ksync_multitap_ports;
+/* Memory Card online (wg-camp, via the DLL): ksync_memcard_mode is the room's
+   choice (KSYNC_MEMCARD_ONLINE = online); ksync_mc_online is set once the
+   DLL actually put both cards in ksync_mc_dir - slot 1 = 1P's card, slot 2 =
+   2P's, the same files on every machine. The core then runs with both slots
+   on "shared" and that folder as its save directory, so the player's own
+   cards/saves are never read or written. See kailleraSyncPrepareMemcards(). */
+static int                 ksync_memcard_mode;
+static bool                ksync_mc_online;
+static char                ksync_mc_dir[PATH_MAX_LENGTH];
 static bool                ksync_send_enabled;
 static bool                ksync_content_ready;
 static bool                ksync_sent;
@@ -269,14 +283,19 @@ bool kailleraSyncActive(void)
 
 bool kailleraSyncBlockSram(void)
 {
-   return kailleraSyncActive() && ksync_no_memcard;
+   return kailleraSyncActive() && (ksync_no_memcard || ksync_mc_online);
 }
 
 bool kailleraSyncBlockSramSave(void)
 {
    /* A replay, Watch Live or retry-connect replaying a match with memory
       cards must not write that match's saves over the viewer's own card. */
-   return kailleraSyncActive() && (ksync_no_memcard || ksync_playback);
+   return kailleraSyncActive() && (ksync_no_memcard || ksync_mc_online || ksync_playback);
+}
+
+const char *kailleraSyncSaveDirectory(void)
+{
+   return kailleraSyncActive() && ksync_mc_online ? ksync_mc_dir : NULL;
 }
 
 /* Appends one timestamped line to logs\kaillera_sync.log next to
@@ -331,6 +350,31 @@ static void ksync_log(const char *fmt, ...)
 /* 2. Canonical settings                                                    */
 /* ------------------------------------------------------------------------ */
 
+/* ksync_forced_options[i]'s value for this game. The multitap keys follow
+   ksync_multitap_ports: a multitap in port 1 for 3-4 players, one in each
+   port for 5-8 (which player gets which pad: kailleraSyncSlotForPort()). The legacy
+   multitap1/multitap2 keys ("auto"/"disabled"/"enabled", older cores) are
+   kept consistent with the current single key. */
+static const char *ksync_forced_value(size_t i)
+{
+   const char *key = ksync_forced_options[i].key;
+
+   if (string_is_equal(key, "pcsx_rearmed_multitap"))
+      return ksync_multitap_ports == 2 ? "ports 1 and 2"
+           : ksync_multitap_ports == 1 ? "port 1" : "disabled";
+   if (string_is_equal(key, "pcsx_rearmed_multitap1"))
+      return ksync_multitap_ports >= 1 ? "enabled" : "disabled";
+   if (string_is_equal(key, "pcsx_rearmed_multitap2"))
+      return ksync_multitap_ports >= 2 ? "enabled" : "disabled";
+   /* Online cards: both slots read/write pcsx-card1.mcd / pcsx-card2.mcd in
+      the save directory, which points at the match's own folder. */
+   if (ksync_mc_online && (string_is_equal(key, "pcsx_rearmed_memcard1")
+            || string_is_equal(key, "pcsx_rearmed_memcard2")))
+      return "shared";
+
+   return ksync_forced_options[i].value;
+}
+
 const char *kailleraSyncForcedCoreOption(const char *key)
 {
    size_t i;
@@ -340,12 +384,12 @@ const char *kailleraSyncForcedCoreOption(const char *key)
 
    /* The room turned "Sem M. Card" off: everyone keeps their own cards (and
       the fingerprint's m= field checks card 1 matches). */
-   if (!ksync_no_memcard && strncmp(key, "pcsx_rearmed_memcard", 20) == 0)
+   if (!ksync_no_memcard && !ksync_mc_online && strncmp(key, "pcsx_rearmed_memcard", 20) == 0)
       return NULL;
 
    for (i = 0; i < sizeof(ksync_forced_options) / sizeof(ksync_forced_options[0]); i++)
       if (string_is_equal(key, ksync_forced_options[i].key))
-         return ksync_forced_options[i].value;
+         return ksync_forced_value(i);
 
    return NULL;
 }
@@ -373,13 +417,39 @@ static uint32_t ksync_options_hash(void)
    for (i = 0; i < sizeof(ksync_forced_options) / sizeof(ksync_forced_options[0]); i++)
    {
       int n = snprintf(line, sizeof(line), "%s=%s;",
-            ksync_forced_options[i].key, ksync_forced_options[i].value);
+            ksync_forced_options[i].key, ksync_forced_value(i));
       if (n > 0)
          crc = encoding_crc32(crc, (const uint8_t*)line, (size_t)n);
    }
 
-   return encoding_crc32(crc, (const uint8_t*)ksync_forced_extra,
+   crc = encoding_crc32(crc, (const uint8_t*)ksync_forced_extra,
          sizeof(ksync_forced_extra) - 1);
+   /* A build that feeds the multitap's pads in another order (before
+      kailleraSyncSlotForPort()) gets a mismatch instead of a silent desync. */
+   if (ksync_multitap_ports)
+   {
+      static const char order[] = "multitap_order=1A,2,1B,1C,1D;";
+      crc = encoding_crc32(crc, (const uint8_t*)order, sizeof(order) - 1);
+   }
+   return crc;
+}
+
+/* Kaillera slot (player - 1) whose input core port `port` reads. Without a
+   multitap it's the same number. With one in port 1, PCSX ReARMed's ports
+   0-3 are the pads 1A-1D and port 4 is the pad in port 2 - and Winning Eleven
+   numbers its controllers 1A, 2, 1B, 1C, 1D (1P to 5P). So player 2 goes to
+   the port-2 pad and players 3-5 to 1B-1D: every Kaillera player is the
+   game's player of the same number. Before this, player 4 landed on 1D, the
+   game's 5P, while its 2P (the port-2 pad) had nobody (Walter's 4-player
+   test, 2026-10-09). With multitaps in both ports, players 6-8 stay on
+   2B-2D. */
+unsigned kailleraSyncSlotForPort(unsigned port)
+{
+   static const unsigned slot_of_port[8] = { 0, 2, 3, 4, 1, 5, 6, 7 };
+
+   if (!ksync_multitap_ports || port >= 8)
+      return port;
+   return slot_of_port[port];
 }
 
 /* ------------------------------------------------------------------------ */
@@ -619,6 +689,82 @@ static void ksync_crc_thread(void *userdata)
    free(job);
 }
 
+/* "CRC32:SIZE" of this game's content, when kailleraSyncPrepareMemcards()
+   already hashed it - kailleraSyncContentLoaded() reuses it instead of
+   hashing the whole ISO a second time. Empty otherwise. */
+static char ksync_content_precomputed[KSYNC_FIELD_LEN];
+
+static bool ksync_core_path_is_pcsx(const char *core_path)
+{
+   char name[PATH_MAX_LENGTH];
+   char *c;
+   if (string_is_empty(core_path))
+      return false;
+   strlcpy(name, path_basename(core_path), sizeof(name));
+   for (c = name; *c; c++)
+      *c = (char)tolower((unsigned char)*c);
+   return strstr(name, "pcsx") != NULL;
+}
+
+void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path)
+{
+   char content_id[KSYNC_FIELD_LEN];
+   char path[PATH_MAX_LENGTH];
+   char dir[PATH_MAX_LENGTH];
+   uint32_t crc  = 0;
+   uint64_t size = 0;
+   int result;
+
+   ksync_mc_online              = false;
+   ksync_mc_dir[0]              = '\0';
+   ksync_content_precomputed[0] = '\0';
+
+   /* PS1 cards only - another core in an "online" room just plays without. */
+   if (ksync_memcard_mode != KSYNC_MEMCARD_ONLINE || !ksync_core_path_is_pcsx(core_path))
+      return;
+
+   if (!ksync_hash_content(content_path, ksync_gen, &crc, &size, 0))
+   {
+      ksync_log("Memory Card online: não consegui ler o jogo (%s).", content_path);
+      result = -1;
+   }
+   else
+   {
+      snprintf(content_id, sizeof(content_id), "%08X:%X", (unsigned)crc, (unsigned)size);
+      strlcpy(ksync_content_precomputed, content_id, sizeof(ksync_content_precomputed));
+
+      /* One folder, emptied first - a stale card from an earlier match must
+         never be what the core opens if the DLL fails to write a new one. */
+      fill_pathname_application_dir(dir, sizeof(dir));
+      fill_pathname_join(ksync_mc_dir, dir, "kaillera-memcards", sizeof(ksync_mc_dir));
+      path_mkdir(ksync_mc_dir);
+      fill_pathname_join(path, ksync_mc_dir, "pcsx-card1.mcd", sizeof(path));
+      filestream_delete(path);
+      fill_pathname_join(path, ksync_mc_dir, "pcsx-card2.mcd", sizeof(path));
+      filestream_delete(path);
+
+      result = kailleraMemcardPrepareExternal(content_id,
+            path_basename(content_path), ksync_mc_dir);
+   }
+
+   if (result == 1)
+   {
+      ksync_mc_online = true;
+      ksync_log("Memory Card online: cartões do jogo %s prontos em %s.",
+            ksync_content_precomputed, ksync_mc_dir);
+      return;
+   }
+
+   /* Couldn't get the cards: play this match with no memory card at all (the
+      safe setup). Should the others have gotten theirs, the fingerprint
+      check reports the memory card difference to everyone. */
+   ksync_mc_dir[0]  = '\0';
+   ksync_no_memcard = true;
+   ksync_log("Memory Card online indisponível (código %d) - partida sem memory card.", result);
+   runloop_msg_queue_push("Memory Card online indisponível - esta partida vai sem memory card.",
+         2, 600, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+}
+
 /* ------------------------------------------------------------------------ */
 /* 3. Fingerprint handshake                                                 */
 /* ------------------------------------------------------------------------ */
@@ -655,7 +801,8 @@ static void ksync_rollback_reset(void)
    ksync_snaps_usec          = 0;
 }
 
-void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard)
+void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
+      bool multitap, int memcard_mode)
 {
    unsigned seed;
 
@@ -669,6 +816,15 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard)
    ksync_num_players       = num_players;
    ksync_playback          = playback;
    ksync_no_memcard        = no_memcard;
+   ksync_memcard_mode      = memcard_mode;
+   ksync_mc_online         = false;
+   ksync_mc_dir[0]         = '\0';
+   ksync_content_precomputed[0] = '\0';
+   /* Every player derives this from the same inputs (the server's player
+      count, the host's announced checkbox), and it is part of the settings
+      hash - a player whose build decides differently gets a mismatch. */
+   ksync_multitap_ports    = !multitap || num_players <= 2 ? 0
+                           : num_players <= 4             ? 1 : 2;
    ksync_send_enabled      = false;
    ksync_digest_enabled    = false;
    ksync_content_ready     = false;
@@ -753,7 +909,26 @@ void kailleraSyncContentLoaded(void)
 
    /* Memory card setup for the fingerprint - taken now, right after the
       player's .srm was loaded and before a single frame could write to it. */
-   if (ksync_no_memcard)
+   if (ksync_mc_online)
+   {
+      /* Both online cards, as the core is about to use them. */
+      char path[PATH_MAX_LENGTH];
+      uint32_t crc[2] = { 0, 0 };
+      int slot;
+      for (slot = 0; slot < 2; slot++)
+      {
+         void *data  = NULL;
+         int64_t len = 0;
+         fill_pathname_join(path, ksync_mc_dir,
+               slot ? "pcsx-card2.mcd" : "pcsx-card1.mcd", sizeof(path));
+         if (filestream_read_file(path, &data, &len) && data)
+            crc[slot] = encoding_crc32(0, (const uint8_t*)data, (size_t)len);
+         free(data);
+      }
+      snprintf(memcard, sizeof(memcard), "mc:%08X:%08X",
+            (unsigned)crc[0], (unsigned)crc[1]);
+   }
+   else if (ksync_no_memcard)
       strlcpy(memcard, "off", sizeof(memcard));
    else
    {
@@ -801,6 +976,12 @@ void kailleraSyncContentLoaded(void)
          strlcpy(ksync_local.content, "?", sizeof(ksync_local.content));
          ksync_content_ready = true;
       }
+      else if (ksync_content_precomputed[0])
+      {
+         /* Same "CRC32:SIZE" ksync_crc_thread() would compute. */
+         strlcpy(ksync_local.content, ksync_content_precomputed, sizeof(ksync_local.content));
+         ksync_content_ready = true;
+      }
       else if ((job = (ksync_crc_job_t*)malloc(sizeof(*job))))
       {
          job->gen = ksync_gen;
@@ -810,12 +991,22 @@ void kailleraSyncContentLoaded(void)
    KSYNC_UNLOCK();
 
    if (ksync_send_enabled)
-      ksync_log("=== Partida: %s | %s | %d jogadores | %s%s",
+      ksync_log("=== Partida: %s | %s | %d jogadores | %s | multitap: %s%s",
             string_is_empty(content) ? "?" : path_basename(content), core,
             ksync_num_players,
-            ksync_no_memcard ? "sem memory card" : "com memory card",
+            ksync_mc_online ? "memory card online"
+            : ksync_no_memcard ? "sem memory card" : "com memory card",
+            ksync_multitap_ports == 2 ? "portas 1 e 2"
+            : ksync_multitap_ports == 1 ? "porta 1" : "nao",
             ksync_digest_enabled ? ""
             : " (retry-connect: detector de RAM liga no go-live)");
+
+   if (ksync_multitap_ports && ksync_core_is_pcsx())
+      runloop_msg_queue_push(ksync_multitap_ports == 2
+            ? "MultiTap ativado: jogador 1 = controle 1-A, 2 = controle 2-A, 3 a 5 = 1-B a 1-D, 6 a 8 = 2-B a 2-D."
+            : "MultiTap ativado: jogador 1 = controle 1-A, 2 = controle 2, 3 a 5 = 1-B a 1-D.",
+            1, 300, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT,
+            MESSAGE_QUEUE_CATEGORY_INFO);
 
    if (!job)
       return;

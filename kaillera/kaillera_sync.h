@@ -36,8 +36,30 @@ void kailleraSyncInit(void);
 /* From the Kaillera game callback (DLL thread), before content loads.
    no_memcard = the room's "Sem M. Card" checkbox (kaillera-client): no memory
    card in either slot and no .srm load/save; false = everyone keeps their
-   own cards, and the fingerprint compares card 1's contents instead. */
-void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard);
+   own cards, and the fingerprint compares card 1's contents instead.
+   multitap = the room's "MultiTap" checkbox: with 3+ players PCSX ReARMed
+   gets a PSX Multitap in port 1 (3-4 players) or ports 1 and 2 (5-8). */
+void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
+      bool multitap, int memcard_mode);
+
+/* The room's memory card choice as reported by the DLL's optional
+   kailleraGetMemcardMode() export. */
+#define KSYNC_MEMCARD_NONE   0
+#define KSYNC_MEMCARD_OWN    1
+#define KSYNC_MEMCARD_ONLINE 2
+
+/* Main thread, right before the Kaillera game's core + content load. For an
+   online-memory-card room running PCSX ReARMed: hashes the content
+   ("CRC32:SIZE", as the fingerprint does), asks the DLL to fetch both cards
+   (slot 1 = 1P's, slot 2 = 2P's) into a folder of their own and, if that
+   worked, makes the core use them (both slots "shared", save directory =
+   that folder - see kailleraSyncSaveDirectory()). On failure the match is
+   played with no memory card. No-op for every other room/core. */
+void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path);
+
+/* RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY hook: the online cards' folder while
+   such a game is loading/running, NULL otherwise. */
+const char *kailleraSyncSaveDirectory(void);
 
 /* Main thread, right after the Kaillera game's content finished loading. */
 void kailleraSyncContentLoaded(void);
@@ -102,6 +124,10 @@ const char *kailleraSyncForcedCoreOption(const char *key);
 
 /* command_event_init_controllers() hook: device to plug into `port`. */
 unsigned kailleraSyncForcedDevice(unsigned port, unsigned device);
+
+/* Kaillera slot (player - 1) whose input core port `port` reads - the same
+   number, except with a PSX Multitap (see the definition). */
+unsigned kailleraSyncSlotForPort(unsigned port);
 
 /* libretro log callback hook - picks up which BIOS the core loaded. */
 void kailleraSyncCoreLog(const char *fmt, va_list vp);
