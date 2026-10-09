@@ -1,16 +1,17 @@
 <#
 .SYNOPSIS
-  Gera os zips de uma versao do RetroArch TIERES, com o grafico padrao (Casanova) ja aplicado.
+  Gera os zips de uma versao do RetroArch TIERES, com o grafico padrao (PC Antigo) ja aplicado.
 
 .DESCRIPTION
   Sempre gera, em -Saida, um zip para cada pasta de graficos\:
-    RetroArch-TIERES-Graficos-Casanova.zip
-    RetroArch-TIERES-Graficos-PS1.zip
+    RetroArch-TIERES-Graficos-PC-Antigo.zip
+    RetroArch-TIERES-Graficos-PC-Moderno.zip
 
   Com -Pasta (a pasta da versao, a mesma do retroarch.exe), tambem:
     1. copia comum\, versao\ e graficos\<padrao>\config\ para dentro da pasta, e apaga
-       de la os arquivos de config dos outros pacotes de graficos (ex.: o .slangp do PS1);
-    2. gera <pasta>.light.zip, sem o retroarch.cfg (quem atualiza mantem controles e configuracoes);
+       de la os arquivos de config dos outros pacotes de graficos (ex.: o .slangp do PC Moderno);
+    2. gera <pasta>.light.zip, so com os binarios (quem atualiza mantem controles, graficos e
+       opcoes do nucleo);
     3. gera <pasta>.zip (pule com -SemCompleto).
 
 .EXAMPLE
@@ -31,16 +32,15 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Grafico que vai dentro de toda versao (completa e light).
-$GraficoPadrao = 'Casanova'
+# Grafico que vai dentro de toda versao completa.
+$GraficoPadrao = 'PC-Antigo'
 
-# Arquivos da versao light, alem dos de comum\, versao\ e do grafico padrao.
+# A versao light so leva os binarios: ela vai por cima de uma pasta TIERES que ja tem o
+# retroarch.cfg, o grafico e as opcoes do nucleo que o jogador escolheu. As opcoes que
+# afetam a sincronia o retroarch.exe forca nas partidas (ksync_forced_options).
 $LightObrigatorios = 'retroarch.exe', 'kailleraclient.dll', 'cores/pcsx_rearmed_libretro.dll'
 # Trava do nucleo: impede o Online Updater de trocar o nucleo TIERES pelo oficial.
 $LightOpcionais    = 'cores/pcsx_rearmed_libretro.dll.lck'
-# Fica so na versao completa: o light vai por cima de uma pasta TIERES que ja tem o seu
-# retroarch.cfg, com os controles e configuracoes do jogador.
-$ForaDoLight       = 'retroarch.cfg'
 
 $Raiz     = $PSScriptRoot
 $Comum    = Join-Path $Raiz 'comum'     # versao + pacotes de graficos
@@ -128,7 +128,7 @@ foreach ($i in $padrao) {
     Write-Host "  $($i.Nome) ($estado)"
 }
 
-# Sobras de outro pacote de graficos testado nesta pasta (ex.: PCSX-ReARMed.slangp do PS1).
+# Sobras de outro pacote de graficos testado nesta pasta (ex.: PCSX-ReARMed.slangp do PC Moderno).
 foreach ($p in $pacotes | Where-Object Name -ne $GraficoPadrao) {
     $cfg = Join-Path $p.FullName 'config'
     if (-not (Test-Path -LiteralPath $cfg)) { continue }
@@ -142,14 +142,13 @@ foreach ($p in $pacotes | Where-Object Name -ne $GraficoPadrao) {
     }
 }
 if (Test-Path -LiteralPath (Join-Path $Pasta 'shaders\shaders_slang')) {
-    Write-Warning 'A pasta da versao tem shaders\shaders_slang (sobra do pacote PS1?). Ela vai para o zip completo.'
+    Write-Warning 'A pasta da versao tem shaders\shaders_slang (sobra do pacote PC Moderno?). Ela vai para o zip completo.'
 }
 
 # --- light e completo -------------------------------------------------------
 
 Write-Host 'Versao:'
-$light = @($LightObrigatorios) + @($LightOpcionais | Where-Object { Test-Path -LiteralPath (Join-Path $Pasta $_) }) +
-    @($padrao.Nome | Where-Object { $_ -notin $ForaDoLight })
+$light = @($LightObrigatorios) + @($LightOpcionais | Where-Object { Test-Path -LiteralPath (Join-Path $Pasta $_) })
 New-Zip (Join-Path $Saida "$nome.light.zip") @($light | ForEach-Object { @{ Origem = (Join-Path $Pasta $_.Replace('/', '\')); Nome = $_ } })
 
 if (-not $SemCompleto) {

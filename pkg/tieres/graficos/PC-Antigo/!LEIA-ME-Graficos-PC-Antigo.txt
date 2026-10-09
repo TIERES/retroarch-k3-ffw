@@ -1,25 +1,25 @@
-﻿GRAFICOS PARA PLAYSTATION - ESTILO CASANOVA - RetroArch TIERES
-===============================================================
+﻿GRAFICOS PARA PLAYSTATION - PC ANTIGO (VGA ONBOARD) - RetroArch TIERES
+======================================================================
 
-Visual igual ao do antigo RetroArch Casanova: Resolução Aprimorada,
-imagem suavizada (filtro bilinear) e sem filtros (shaders).
-Leve: não pesa nada na placa de vídeo, roda até em PC antigo.
+Resolução Aprimorada, imagem suavizada (filtro bilinear) e sem
+filtros (shaders). Leve: não pesa nada na placa de vídeo, roda até
+em PC antigo ou com vídeo onboard (integrado). É o gráfico que já
+vem na versão completa do RetroArch TIERES.
 
 COMO INSTALAR
   1. Feche o RetroArch.
   2. Extraia este .zip DENTRO da pasta do RetroArch
      (RetroArch-1.16.0.FFW.TIERES.0.x, a mesma pasta do retroarch.exe).
      No "Extrair Tudo" do Windows, apague o final do caminho que o
-     Windows acrescenta ("\RetroArch-TIERES-Graficos-Casanova").
+     Windows acrescenta ("\RetroArch-TIERES-Graficos-PC-Antigo").
      Se o Windows perguntar, escolha "Substituir".
   3. Abra o RetroArch e jogue normalmente.
 
   Seus controles continuam como estavam. As opções do núcleo do
-  PlayStation voltam ao padrão do pacote TIERES (igual acontece ao
-  atualizar com a versão light), com o ajuste que tira as listras
-  brancas do gramado.
-  Se você tinha instalado outro pacote de gráficos, este o substitui
-  e desliga os filtros (shaders) dele.
+  PlayStation voltam ao padrão do pacote TIERES, com o ajuste que
+  tira as listras brancas do gramado.
+  Se você tinha instalado o pacote PC Moderno, este o substitui e
+  desliga os filtros (shaders) dele.
 
 O QUE MUDA (só no PlayStation)
   - Resolução Aprimorada ligada: o jogo é desenhado em resolução

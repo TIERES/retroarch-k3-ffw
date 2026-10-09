@@ -1,16 +1,22 @@
-﻿GRAFICOS MELHORES PARA PLAYSTATION - RetroArch TIERES
-======================================================
+﻿GRAFICOS PARA PLAYSTATION - PC MODERNO (VGA DEDICADA) - RetroArch TIERES
+========================================================================
+
+Filtro SMAA + FSR e tela cheia na resolução real do monitor. Pede uma
+placa de vídeo dedicada; em PC antigo ou com vídeo onboard, use o
+pacote PC Antigo.
 
 COMO INSTALAR
   1. Feche o RetroArch.
   2. Extraia este .zip DENTRO da pasta do RetroArch
      (RetroArch-1.16.0.FFW.TIERES.0.x, a mesma pasta do retroarch.exe).
      No "Extrair Tudo" do Windows, apague o final do caminho que o
-     Windows acrescenta ("\RetroArch-TIERES-Graficos-PS1").
+     Windows acrescenta ("\RetroArch-TIERES-Graficos-PC-Moderno").
      Se o Windows perguntar, escolha "Substituir".
   3. Abra o RetroArch e jogue normalmente.
 
-  Seus controles e demais configurações continuam como estavam.
+  Seus controles continuam como estavam. As opções do núcleo do
+  PlayStation voltam ao padrão do pacote TIERES.
+  Se você tinha instalado o pacote PC Antigo, este o substitui.
 
 O QUE MUDA (só no PlayStation)
   - O jogo abre em tela cheia, na resolução real do monitor.
@@ -35,10 +41,9 @@ TROCAR O FILTRO (durante o jogo)
 IMAGEM NA PROPORÇÃO ORIGINAL (4:3, com faixas pretas nas laterais)
   F1 > Configurações > Vídeo > Escala > Proporção da tela > 4:3
 
-PC FRACO / VÍDEO INTEGRADO
-  Se o jogo ficar lento, apague o arquivo
-  config\PCSX-ReARMed\PCSX-ReARMed.slangp
-  (fica sem filtro, mas a tela cheia continua na resolução real).
+PC FRACO / VÍDEO ONBOARD
+  Se o jogo ficar lento, instale o pacote PC Antigo (VGA onboard)
+  por cima deste: ele desliga os filtros.
 
 DESINSTALAR
   Apague:
