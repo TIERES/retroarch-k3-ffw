@@ -2619,11 +2619,50 @@ void AddGamesToList() {
    *++kailleraGames = '\0';
 }
 
+/* TAB opens the chat - RetroArch's "Netplay Player Chat" hotkey, which this
+   fork sends to the Kaillera room (netplay_input_chat()) - in every Kaillera
+   game, P2P or Server (Walter, 2026-10-08), whatever key an older
+   retroarch.cfg had there. Not if TAB already does something else (a
+   player's button or another hotkey). Saved with the config like any bind
+   changed in the menu. */
+void input_keyboard_mapping_bits(unsigned mode, unsigned key); /* input/input_driver.c */
+static void kailleraChatKeyTab(void)
+{
+   unsigned user, i;
+   struct retro_keybind *chat = &input_config_binds[0][RARCH_NETPLAY_PLAYER_CHAT];
+   enum retro_key old         = chat->key;
+   bool old_in_use            = false;
+
+   if (old == RETROK_TAB)
+      return;
+   for (user = 0; user < MAX_USERS; user++)
+   {
+      for (i = 0; i < RARCH_BIND_LIST_END; i++)
+      {
+         const struct retro_keybind *bind = &input_config_binds[user][i];
+         if (bind == chat)
+            continue;
+         if (bind->key == RETROK_TAB)
+            return;
+         if (bind->key == old)
+            old_in_use = true;
+      }
+   }
+   chat->key = RETROK_TAB;
+   /* Keys bound to something aren't passed on to the core as keyboard
+      input (input_keyboard_mapping_bits(), as when reading the config). */
+   if (old != RETROK_UNKNOWN && !old_in_use)
+      input_keyboard_mapping_bits(0, old);
+   input_keyboard_mapping_bits(1, RETROK_TAB);
+   RARCH_LOG("[Kaillera] Chat: TAB.\n");
+}
+
 void kMessage_core_info()
 {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    client.gameplay.synchronizeGame(0, 0);
 #endif
+   kailleraChatKeyTab();
    struct retro_system_info* system = &runloop_state_get_ptr()->system.info;
    if (system->library_name != NULL)
    {
