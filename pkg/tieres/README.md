@@ -8,8 +8,8 @@ pkg/tieres/
   empacotar.ps1          gera os zips (versão completa, light e pacotes de gráficos)
   comum/                 vai em TODA versão e em todos os pacotes de gráficos
     config/PCSX-ReARMed/PCSX-ReARMed.opt     opções do núcleo do PlayStation
-  versao/                vai em TODA versão (completa e light), mas não nos gráficos
-    retroarch.cfg                            configuração geral (controles, Kaillera, menu...)
+  versao/                vai em TODA versão completa, mas não nos gráficos
+    retroarch.cfg                            configuração geral (controles, Kaillera, menu...); fora do light
   graficos/
     Casanova/            PADRÃO: vai dentro de toda versão (completa e light)
     PS1/                 pacote opcional: SMAA+FSR e outros shaders
@@ -37,6 +37,11 @@ Para trocar o padrão, mude `$GraficoPadrao` no `empacotar.ps1`.
 O `versao/retroarch.cfg` é o que vai para os jogadores. Ele fica fora dos pacotes de
 gráficos para que instalar um gráfico não mexa nos controles de ninguém.
 
+Ele também fica fora da versão light: quem atualiza já tem uma pasta TIERES com o próprio
+`retroarch.cfg`, e o light não pode apagar os controles e as configurações do jogador.
+Por isso, uma novidade de uma versão nova não pode depender de mudança no `retroarch.cfg`:
+o exe tem que aplicar sozinho (como o chat no TAB da 0.5, em `kailleraChatKeyTab()`).
+
 Para mudar uma configuração, edite este arquivo. O `retroarch.cfg` da pasta da versão é
 sobrescrito pelo script, e o RetroArch regrava o arquivo ao fechar.
 
@@ -63,7 +68,7 @@ o próprio `%TMP%`.
    (e apaga o `.slangp` do PS1, se sobrou de algum teste) e gera, ao lado dela:
 
    - `RetroArch-1.16.0.FFW.TIERES.0.x.zip` (completo; pule com `-SemCompleto`)
-   - `RetroArch-1.16.0.FFW.TIERES.0.x.light.zip`
+   - `RetroArch-1.16.0.FFW.TIERES.0.x.light.zip` (sem o `retroarch.cfg`)
    - `RetroArch-TIERES-Graficos-Casanova.zip` e `RetroArch-TIERES-Graficos-PS1.zip`
 
    Se algum zip já existir, ele para; use `-Substituir` para sobrescrever.

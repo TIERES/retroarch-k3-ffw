@@ -10,7 +10,7 @@
   Com -Pasta (a pasta da versao, a mesma do retroarch.exe), tambem:
     1. copia comum\, versao\ e graficos\<padrao>\config\ para dentro da pasta, e apaga
        de la os arquivos de config dos outros pacotes de graficos (ex.: o .slangp do PS1);
-    2. gera <pasta>.light.zip;
+    2. gera <pasta>.light.zip, sem o retroarch.cfg (quem atualiza mantem controles e configuracoes);
     3. gera <pasta>.zip (pule com -SemCompleto).
 
 .EXAMPLE
@@ -38,6 +38,9 @@ $GraficoPadrao = 'Casanova'
 $LightObrigatorios = 'retroarch.exe', 'kailleraclient.dll', 'cores/pcsx_rearmed_libretro.dll'
 # Trava do nucleo: impede o Online Updater de trocar o nucleo TIERES pelo oficial.
 $LightOpcionais    = 'cores/pcsx_rearmed_libretro.dll.lck'
+# Fica so na versao completa: o light vai por cima de uma pasta TIERES que ja tem o seu
+# retroarch.cfg, com os controles e configuracoes do jogador.
+$ForaDoLight       = 'retroarch.cfg'
 
 $Raiz     = $PSScriptRoot
 $Comum    = Join-Path $Raiz 'comum'     # versao + pacotes de graficos
@@ -145,7 +148,8 @@ if (Test-Path -LiteralPath (Join-Path $Pasta 'shaders\shaders_slang')) {
 # --- light e completo -------------------------------------------------------
 
 Write-Host 'Versao:'
-$light = @($LightObrigatorios) + @($LightOpcionais | Where-Object { Test-Path -LiteralPath (Join-Path $Pasta $_) }) + @($padrao.Nome)
+$light = @($LightObrigatorios) + @($LightOpcionais | Where-Object { Test-Path -LiteralPath (Join-Path $Pasta $_) }) +
+    @($padrao.Nome | Where-Object { $_ -notin $ForaDoLight })
 New-Zip (Join-Path $Saida "$nome.light.zip") @($light | ForEach-Object { @{ Origem = (Join-Path $Pasta $_.Replace('/', '\')); Nome = $_ } })
 
 if (-not $SemCompleto) {
