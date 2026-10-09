@@ -58,6 +58,7 @@
 #endif
 #include "../tasks/tasks_internal.h"
 #include "../../kaillera/kaillera.h"
+#include "../../kaillera/kaillera_sync.h"
 
 #define HOLD_BTN_DELAY_SEC 2
 
@@ -6138,10 +6139,11 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
    /* Read input state */
    if (kailleraNetplay) {
 
-      /* Core port N always reads Kaillera slot N. Each player's local
-         input_remap_port_map / input_max_users used to decide this, so two
-         machines could feed the same frame to different ports. */
-      unsigned mapped_port = port;
+      /* Core port N reads Kaillera slot N - the same on every machine, except
+         that a PSX Multitap reorders them (kailleraSyncSlotForPort()). Each
+         player's local input_remap_port_map / input_max_users used to decide
+         this, so two machines could feed the same frame to different ports. */
+      unsigned mapped_port = kailleraSyncSlotForPort(port);
       bool bitmask_enabled = false;
 
       if (mapped_port < MAX_INPUTS)

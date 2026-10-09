@@ -351,8 +351,8 @@ static void ksync_log(const char *fmt, ...)
 /* ------------------------------------------------------------------------ */
 
 /* ksync_forced_options[i]'s value for this game. The multitap keys follow
-   ksync_multitap_ports: players 1-4 land on the multitap in port 1 (core
-   ports 0-3 = pads 1A-1D), players 5-8 on the one in port 2. The legacy
+   ksync_multitap_ports: a multitap in port 1 for 3-4 players, one in each
+   port for 5-8 (which player gets which pad: kailleraSyncSlotForPort()). The legacy
    multitap1/multitap2 keys ("auto"/"disabled"/"enabled", older cores) are
    kept consistent with the current single key. */
 static const char *ksync_forced_value(size_t i)
@@ -422,8 +422,34 @@ static uint32_t ksync_options_hash(void)
          crc = encoding_crc32(crc, (const uint8_t*)line, (size_t)n);
    }
 
-   return encoding_crc32(crc, (const uint8_t*)ksync_forced_extra,
+   crc = encoding_crc32(crc, (const uint8_t*)ksync_forced_extra,
          sizeof(ksync_forced_extra) - 1);
+   /* A build that feeds the multitap's pads in another order (before
+      kailleraSyncSlotForPort()) gets a mismatch instead of a silent desync. */
+   if (ksync_multitap_ports)
+   {
+      static const char order[] = "multitap_order=1A,2,1B,1C,1D;";
+      crc = encoding_crc32(crc, (const uint8_t*)order, sizeof(order) - 1);
+   }
+   return crc;
+}
+
+/* Kaillera slot (player - 1) whose input core port `port` reads. Without a
+   multitap it's the same number. With one in port 1, PCSX ReARMed's ports
+   0-3 are the pads 1A-1D and port 4 is the pad in port 2 - and Winning Eleven
+   numbers its controllers 1A, 2, 1B, 1C, 1D (1P to 5P). So player 2 goes to
+   the port-2 pad and players 3-5 to 1B-1D: every Kaillera player is the
+   game's player of the same number. Before this, player 4 landed on 1D, the
+   game's 5P, while its 2P (the port-2 pad) had nobody (Walter's 4-player
+   test, 2026-10-09). With multitaps in both ports, players 6-8 stay on
+   2B-2D. */
+unsigned kailleraSyncSlotForPort(unsigned port)
+{
+   static const unsigned slot_of_port[8] = { 0, 2, 3, 4, 1, 5, 6, 7 };
+
+   if (!ksync_multitap_ports || port >= 8)
+      return port;
+   return slot_of_port[port];
 }
 
 /* ------------------------------------------------------------------------ */
@@ -977,8 +1003,8 @@ void kailleraSyncContentLoaded(void)
 
    if (ksync_multitap_ports && ksync_core_is_pcsx())
       runloop_msg_queue_push(ksync_multitap_ports == 2
-            ? "MultiTap ativado nas portas 1 e 2 (jogadores 1-4 e 5-8)."
-            : "MultiTap ativado na porta 1 (jogadores 1 a 4).",
+            ? "MultiTap ativado: jogador 1 = controle 1-A, 2 = controle 2-A, 3 a 5 = 1-B a 1-D, 6 a 8 = 2-B a 2-D."
+            : "MultiTap ativado: jogador 1 = controle 1-A, 2 = controle 2, 3 a 5 = 1-B a 1-D.",
             1, 300, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT,
             MESSAGE_QUEUE_CATEGORY_INFO);
 

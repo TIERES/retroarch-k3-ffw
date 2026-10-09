@@ -125,6 +125,10 @@ const char *kailleraSyncForcedCoreOption(const char *key);
 /* command_event_init_controllers() hook: device to plug into `port`. */
 unsigned kailleraSyncForcedDevice(unsigned port, unsigned device);
 
+/* Kaillera slot (player - 1) whose input core port `port` reads - the same
+   number, except with a PSX Multitap (see the definition). */
+unsigned kailleraSyncSlotForPort(unsigned port);
+
 /* libretro log callback hook - picks up which BIOS the core loaded. */
 void kailleraSyncCoreLog(const char *fmt, va_list vp);
 
