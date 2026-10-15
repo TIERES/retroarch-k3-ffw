@@ -78,6 +78,13 @@ o próprio `%TMP%`.
    Se algum zip já existir, ele para; use `-Substituir` para sobrescrever.
    Só os pacotes de gráficos: `.\pkg\tieres\empacotar.ps1 -Saida <pasta>`.
 
+4. O script anota o caminho do light em `%LOCALAPPDATA%\RetroArch-TIERES\ultima-light.txt`.
+   A task "Publish release to updater" do `kaillera-client` pega esse light, confere se o
+   `kailleraclient.dll` dele é o da release e envia ao WE Camp só os arquivos que mudaram.
+   Daí em diante, quem abre o Kaillera no RetroArch TIERES recebe o aviso, baixa os
+   arquivos novos e o RetroArch reinicia sozinho. Por isso o light tem que ser gerado com
+   o `kailleraclient.dll` da release (a mesma versão do tag).
+
 ## Observações
 
 - O `.gitignore` da raiz ignora pastas `config`; o `.gitignore` daqui as libera.

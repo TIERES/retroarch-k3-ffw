@@ -149,7 +149,16 @@ if (Test-Path -LiteralPath (Join-Path $Pasta 'shaders\shaders_slang')) {
 
 Write-Host 'Versao:'
 $light = @($LightObrigatorios) + @($LightOpcionais | Where-Object { Test-Path -LiteralPath (Join-Path $Pasta $_) })
-New-Zip (Join-Path $Saida "$nome.light.zip") @($light | ForEach-Object { @{ Origem = (Join-Path $Pasta $_.Replace('/', '\')); Nome = $_ } })
+$lightZip = Join-Path $Saida "$nome.light.zip"
+New-Zip $lightZip @($light | ForEach-Object { @{ Origem = (Join-Path $Pasta $_.Replace('/', '\')); Nome = $_ } })
+
+# A task "Publish release to updater" do kaillera-client publica este light no
+# atualizador do WE Camp (dentro do RetroArch TIERES, o DLL atualiza o pacote
+# todo) - ela acha o zip por esta anotacao.
+$anotacao = Join-Path $env:LOCALAPPDATA 'RetroArch-TIERES\ultima-light.txt'
+New-Item -ItemType Directory -Force -Path (Split-Path $anotacao) | Out-Null
+[IO.File]::WriteAllText($anotacao, $lightZip, (New-Object Text.UTF8Encoding $false))
+Write-Host "  (anotado em $anotacao para a task do atualizador)"
 
 if (-not $SemCompleto) {
     $base   = $Pasta + '\'
