@@ -188,6 +188,7 @@ typedef struct
 typedef struct
 {
    unsigned gen;
+   bool pcsx;     /* the core's sidecar-.cue rule applies, see ksync_pcsx_sidecar_cue() */
    char path[PATH_MAX_LENGTH];
 } ksync_crc_job_t;
 
@@ -588,10 +589,50 @@ static bool ksync_line_starts_with_file(const char *s)
        && (s[4] == ' ' || s[4] == '\t');
 }
 
+/* PCSX ReARMed opens a disc image through cdriso.c's ISOopen(), which first
+   tries the image's name with its last 4 characters swapped for .toc, .ccd,
+   .mds and .cue. A .cue found that way takes over: parsecue() swaps the open
+   file for the .bin the .cue names, and the image itself is never read - a
+   .cue/.bin pair left next to the .chd of the same game, say. Two players
+   "with the same .chd" then emulate different discs (the core reads a .chd's
+   audio tracks a few sectors off), and the game drifts apart: the WE PW26
+   desync of 2026-10-14. True, with that .cue in `cue`, when it takes over;
+   a .toc/.ccd/.mds comes first and keeps the image. */
+static bool ksync_pcsx_sidecar_cue(const char *image, char *cue, size_t len)
+{
+   static const char *const before[] = { ".toc", ".ccd", ".mds" };
+   size_t n = strlen(image);
+   const char *tail;
+   size_t i;
+
+   if (n < 4 || n >= len)
+      return false;
+   tail = image + n - 4;
+   /* A .cue is read as itself, and so is a ".cd<X>" file. */
+   if (     string_is_equal_noncase(tail, ".cue")
+         || string_is_equal_noncase(tail, ".m3u")
+         || (tail[0] == '.' && tolower((unsigned char)tail[1]) == 'c'
+            && tolower((unsigned char)tail[2]) == 'd'))
+      return false;
+
+   strlcpy(cue, image, len);
+   for (i = 0; i < sizeof(before) / sizeof(before[0]); i++)
+   {
+      strlcpy(cue + n - 4, before[i], len - (n - 4));
+      if (path_is_valid(cue))
+         return false;
+   }
+   strlcpy(cue + n - 4, ".cue", len - (n - 4));
+   return path_is_valid(cue);
+}
+
 /* .cue/.m3u only describe the real data - hash the files they point at (in
-   order), so two different .bin behind identically named .cue still differ. */
+   order), so two different .bin behind identically named .cue still differ.
+   pcsx: `path` is an image PCSX ReARMed opens itself (the content, or an
+   .m3u entry), so its sidecar .cue counts instead - see above. The first
+   such .cue goes to `sidecar` (PATH_MAX_LENGTH chars, may be NULL). */
 static bool ksync_hash_content(const char *path, unsigned gen,
-      uint32_t *crc, uint64_t *size, int depth)
+      uint32_t *crc, uint64_t *size, int depth, bool pcsx, char *sidecar)
 {
    const char *ext = path_get_extension(path);
    bool is_cue     = string_is_equal_noncase(ext, "cue");
@@ -601,6 +642,24 @@ static bool ksync_hash_content(const char *path, unsigned gen,
    char *line, *next;
    bool any        = false;
    bool ok         = true;
+
+   if (pcsx && !is_cue && !is_m3u)
+   {
+      char cue[PATH_MAX_LENGTH];
+      uint32_t cue_crc  = *crc;
+      uint64_t cue_size = *size;
+
+      if (     ksync_pcsx_sidecar_cue(path, cue, sizeof(cue))
+            && ksync_hash_content(cue, gen, &cue_crc, &cue_size, depth, false, NULL))
+      {
+         *crc  = cue_crc;
+         *size = cue_size;
+         if (sidecar && !sidecar[0])
+            strlcpy(sidecar, cue, PATH_MAX_LENGTH);
+         return true;
+      }
+      /* A .cue naming files that aren't there doesn't take over. */
+   }
 
    if ((!is_cue && !is_m3u) || depth >= 2)
       return ksync_hash_file(path, gen, crc, size);
@@ -648,7 +707,9 @@ static bool ksync_hash_content(const char *path, unsigned gen,
          continue;
 
       fill_pathname_resolve_relative(full, path, name, sizeof(full));
-      ok  = ksync_hash_content(full, gen, crc, size, depth + 1);
+      /* .m3u entries are images the core opens; a .cue's FILEs aren't. */
+      ok  = ksync_hash_content(full, gen, crc, size, depth + 1,
+            pcsx && is_m3u, sidecar);
       any = true;
    }
 
@@ -660,11 +721,27 @@ static bool ksync_hash_content(const char *path, unsigned gen,
    return ok;
 }
 
+/* The player is about to play something other than the file they picked - a
+   different "arquivo do jogo (ISO)" in the fingerprint is the likely result. */
+static void ksync_report_sidecar(const char *content, const char *cue)
+{
+   char msg[256];
+
+   ksync_log("Atenção: %s está na pasta do jogo - o PCSX ReARMed joga o que esse "
+         ".cue indica, e não o %s. A verificação de sincronia usa o que ele joga.",
+         path_basename(cue), path_basename(content));
+   snprintf(msg, sizeof(msg), "Atenção: o RetroArch vai jogar o %s (está na "
+         "mesma pasta), e não o %s.", path_basename(cue), path_basename(content));
+   runloop_msg_queue_push(msg, 1, 600, false, NULL,
+         MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_WARNING);
+}
+
 static void ksync_crc_thread(void *userdata)
 {
    ksync_crc_job_t *job = (ksync_crc_job_t*)userdata;
    uint32_t crc         = 0;
    uint64_t size        = 0;
+   char sidecar[PATH_MAX_LENGTH];
    bool ok;
 
 #ifdef _WIN32
@@ -672,7 +749,10 @@ static void ksync_crc_thread(void *userdata)
    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 #endif
 
-   ok = ksync_hash_content(job->path, job->gen, &crc, &size, 0);
+   sidecar[0] = '\0';
+   ok = ksync_hash_content(job->path, job->gen, &crc, &size, 0, job->pcsx, sidecar);
+   if (ok && sidecar[0] && job->gen == ksync_gen)
+      ksync_report_sidecar(job->path, sidecar);
 
    KSYNC_LOCK();
    if (job->gen == ksync_gen)
@@ -711,19 +791,36 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
    char content_id[KSYNC_FIELD_LEN];
    char path[PATH_MAX_LENGTH];
    char dir[PATH_MAX_LENGTH];
+   char sidecar[PATH_MAX_LENGTH];
    uint32_t crc  = 0;
    uint64_t size = 0;
+   bool ok;
    int result;
 
    ksync_mc_online              = false;
    ksync_mc_dir[0]              = '\0';
    ksync_content_precomputed[0] = '\0';
+   sidecar[0]                   = '\0';
 
    /* PS1 cards only - another core in an "online" room just plays without. */
    if (ksync_memcard_mode != KSYNC_MEMCARD_ONLINE || !ksync_core_path_is_pcsx(core_path))
       return;
 
-   if (!ksync_hash_content(content_path, ksync_gen, &crc, &size, 0))
+   /* What the core will play - the fingerprint's content field. */
+   ok = ksync_hash_content(content_path, ksync_gen, &crc, &size, 0, true, sidecar);
+   if (ok)
+      snprintf(ksync_content_precomputed, sizeof(ksync_content_precomputed),
+            "%08X:%X", (unsigned)crc, (unsigned)size);
+   /* The cards stay those of the file the player picked, sidecar .cue or not. */
+   if (ok && sidecar[0])
+   {
+      ksync_report_sidecar(content_path, sidecar);
+      crc  = 0;
+      size = 0;
+      ok   = ksync_hash_content(content_path, ksync_gen, &crc, &size, 0, false, NULL);
+   }
+
+   if (!ok)
    {
       ksync_log("Memory Card online: não consegui ler o jogo (%s).", content_path);
       result = -1;
@@ -731,7 +828,6 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
    else
    {
       snprintf(content_id, sizeof(content_id), "%08X:%X", (unsigned)crc, (unsigned)size);
-      strlcpy(ksync_content_precomputed, content_id, sizeof(ksync_content_precomputed));
 
       /* One folder, emptied first - a stale card from an earlier match must
          never be what the core opens if the DLL fails to write a new one. */
@@ -751,7 +847,7 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
    {
       ksync_mc_online = true;
       ksync_log("Memory Card online: cartões do jogo %s prontos em %s.",
-            ksync_content_precomputed, ksync_mc_dir);
+            content_id, ksync_mc_dir);
       return;
    }
 
@@ -985,6 +1081,7 @@ void kailleraSyncContentLoaded(void)
       else if ((job = (ksync_crc_job_t*)malloc(sizeof(*job))))
       {
          job->gen = ksync_gen;
+         job->pcsx = ksync_core_is_pcsx();
          strlcpy(job->path, content, sizeof(job->path));
       }
    }
