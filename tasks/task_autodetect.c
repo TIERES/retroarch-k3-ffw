@@ -42,6 +42,7 @@
 #endif
 
 #include "../runloop.h"
+#include "../kaillera/kaillera.h"
 
 enum autoconfig_handle_flags
 {
@@ -884,7 +885,13 @@ bool input_autoconfigure_disconnect(unsigned port, const char *name)
 
    task_queue_push(task);
 
-   if (pause_on_disconnect && core_is_running)
+   /* Not while a Kaillera game is starting or running: nothing can unpause
+      it there (the pause hotkey is ignored), so every player would sit
+      waiting for this machine's input - and with SDL2 even a joypad driver
+      reinit counts as a disconnect. The pad just reads neutral until it's
+      back. */
+   if (pause_on_disconnect && core_is_running
+         && !kailleraNetplay && !kailleraInitialisedInternal)
    {
 #ifdef HAVE_MENU
       bool menu_pause_libretro = settings->bools.menu_pause_libretro;

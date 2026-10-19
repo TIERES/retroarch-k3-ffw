@@ -7039,6 +7039,12 @@ int runloop_iterate(void)
    if (kailleraInitialisedInternal & !stop_execute_shit)
    {
       stop_execute_shit++;
+      /* A pause left over from before this game (pause hotkey or focus loss
+         between games, a controller "disconnect") would hold this machine on
+         frame 0 - and everyone else with it, since nothing can unpause
+         during a Kaillera game. */
+      if (runloop_st->flags & RUNLOOP_FLAG_PAUSED)
+         command_event(CMD_EVENT_UNPAUSE, NULL);
       /* Before the core loads: it reads its save directory/memory card
          options while loading the game. */
       kailleraSyncPrepareMemcards(fname, cpath);
