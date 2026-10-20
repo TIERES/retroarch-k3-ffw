@@ -377,10 +377,15 @@ int (WINAPI* kailleraGetMultiTapF)();
    cards as dir\pcsx-card1.mcd (1P) and dir\pcsx-card2.mcd (2P); 1 = ready,
    0 = not an online-card game, < 0 = failed.
    kailleraMemcardFinish(): called once the core is unloaded (its card files
-   closed) - the DLL sends the final cards back to wg-camp. */
+   closed) - the DLL sends the final cards back to wg-camp.
+   kailleraMemcardEmptySlots(): after a successful prepare, the slots that
+   start with no memory card inserted (bit 0 = slot 1, bit 1 = slot 2) - each
+   player picks their own slot's card, and "Sem M. Card" leaves it empty.
+   NULL on older DLLs: a slot without a card file gets a blank card. */
 int (WINAPI* kailleraGetMemcardModeF)();
 int (WINAPI* kailleraMemcardPrepareF)(const char* contentId, const char* gameFile, const char* dir);
 void (WINAPI* kailleraMemcardFinishF)();
+int (WINAPI* kailleraMemcardEmptySlotsF)();
 
 int kailleraMemcardPrepareExternal(const char* contentId, const char* gameFile, const char* dir)
 {
@@ -389,6 +394,15 @@ int kailleraMemcardPrepareExternal(const char* contentId, const char* gameFile, 
       return kailleraMemcardPrepareF(contentId, gameFile, dir);
 #endif
    return -2;
+}
+
+int kailleraMemcardEmptySlotsExternal(void)
+{
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   if (kailleraMemcardEmptySlotsF != NULL)
+      return kailleraMemcardEmptySlotsF();
+#endif
+   return 0;
 }
 
 /* retry-connect - optional, same GetProcAddress-if-present convention as
@@ -451,6 +465,7 @@ void CloseKaillera() {
    kailleraGetMemcardModeF                 = NULL;
    kailleraMemcardPrepareF                 = NULL;
    kailleraMemcardFinishF                  = NULL;
+   kailleraMemcardEmptySlotsF              = NULL;
    kailleraRetryConnectCanControlF         = NULL;
    kailleraRetryConnectNotifyLocalControlF = NULL;
    kailleraRetryConnectPollF               = NULL;
@@ -742,6 +757,7 @@ void LoadKaillera() {
       kailleraGetMemcardModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraGetMemcardMode");
       kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "kailleraMemcardPrepare");
       kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraMemcardFinish");
+      kailleraMemcardEmptySlotsF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraMemcardEmptySlots");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
@@ -777,6 +793,7 @@ void LoadKaillera() {
       kailleraGetMemcardModeF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraGetMemcardMode@0");
       kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "_kailleraMemcardPrepare@12");
       kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraMemcardFinish@0");
+      kailleraMemcardEmptySlotsF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraMemcardEmptySlots@0");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");
