@@ -210,9 +210,13 @@ static int                 ksync_multitap_ports;
    DLL actually put both cards in ksync_mc_dir - slot 1 = 1P's card, slot 2 =
    2P's, the same files on every machine. The core then runs with both slots
    on "shared" and that folder as its save directory, so the player's own
-   cards/saves are never read or written. See kailleraSyncPrepareMemcards(). */
+   cards/saves are never read or written. See kailleraSyncPrepareMemcards().
+   ksync_mc_empty_slots: the slots the DLL left without a card (bit 0 = slot
+   1, bit 1 = slot 2 - the player of that slot picked "Sem M. Card"), which
+   then run on "none": no card inserted, not a blank one. */
 static int                 ksync_memcard_mode;
 static bool                ksync_mc_online;
+static unsigned            ksync_mc_empty_slots;
 static char                ksync_mc_dir[PATH_MAX_LENGTH];
 static bool                ksync_send_enabled;
 static bool                ksync_content_ready;
@@ -368,10 +372,12 @@ static const char *ksync_forced_value(size_t i)
    if (string_is_equal(key, "pcsx_rearmed_multitap2"))
       return ksync_multitap_ports >= 2 ? "enabled" : "disabled";
    /* Online cards: both slots read/write pcsx-card1.mcd / pcsx-card2.mcd in
-      the save directory, which points at the match's own folder. */
-   if (ksync_mc_online && (string_is_equal(key, "pcsx_rearmed_memcard1")
-            || string_is_equal(key, "pcsx_rearmed_memcard2")))
-      return "shared";
+      the save directory, which points at the match's own folder - but a slot
+      the DLL left empty has no card at all. */
+   if (ksync_mc_online && string_is_equal(key, "pcsx_rearmed_memcard1"))
+      return (ksync_mc_empty_slots & 1) ? "none" : "shared";
+   if (ksync_mc_online && string_is_equal(key, "pcsx_rearmed_memcard2"))
+      return (ksync_mc_empty_slots & 2) ? "none" : "shared";
 
    return ksync_forced_options[i].value;
 }
@@ -798,6 +804,7 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
    int result;
 
    ksync_mc_online              = false;
+   ksync_mc_empty_slots         = 0;
    ksync_mc_dir[0]              = '\0';
    ksync_content_precomputed[0] = '\0';
    sidecar[0]                   = '\0';
@@ -845,9 +852,12 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
 
    if (result == 1)
    {
-      ksync_mc_online = true;
-      ksync_log("Memory Card online: cartões do jogo %s prontos em %s.",
-            content_id, ksync_mc_dir);
+      ksync_mc_online      = true;
+      ksync_mc_empty_slots = (unsigned)kailleraMemcardEmptySlotsExternal() & 3;
+      ksync_log("Memory Card online: cartões do jogo %s prontos em %s (slot 1: %s, slot 2: %s).",
+            content_id, ksync_mc_dir,
+            (ksync_mc_empty_slots & 1) ? "vazio" : "cartão",
+            (ksync_mc_empty_slots & 2) ? "vazio" : "cartão");
       return;
    }
 
@@ -914,6 +924,7 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
    ksync_no_memcard        = no_memcard;
    ksync_memcard_mode      = memcard_mode;
    ksync_mc_online         = false;
+   ksync_mc_empty_slots    = 0;
    ksync_mc_dir[0]         = '\0';
    ksync_content_precomputed[0] = '\0';
    /* Every player derives this from the same inputs (the server's player
