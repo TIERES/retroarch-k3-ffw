@@ -1744,7 +1744,12 @@ static int ksync_compare_states(ksync_peer_t *peer, char (*log)[320], int max_lo
 #define WE_ROSTER_LOCAL  0x64570  /* 23 x 16-byte player names           */
 #define WE_ROSTER_VISITA 0x646E0
 #define WE_PADS          0x758D9  /* pads 1-4: 0 LOCAL, 1 VISITA, FF none */
-#define WE_NAME_PTRS     0x15DBC4 /* team name pointers (some menus only) */
+/* Team select screen only (the match overwrites both): a pointer per team
+   to its name - what the screen shows, e.g. "PAL99", "CROACIA" - and its
+   3-letter code, team 0 last (4 bytes each, "CRO\0"). */
+#define WE_SEL_NAME_PTRS 0xBF0E8
+#define WE_SEL_CODES_END 0x800DC
+#define WE_TEAMS         128
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
 #define KSYNC_LIVE_HEARTBEAT_FRAMES 900  /* and send at least every 15 s   */
@@ -1761,6 +1766,11 @@ static struct
    unsigned prev_clock;
    uint32_t sent_sig;    /* what the last state sent had (without the clock) */
    unsigned sent_frame;
+   /* The teams' names and codes, read from the team select screen (the
+      last time it was up this game) - the match itself only has the slot. */
+   bool     have_names;
+   char     names[WE_TEAMS][17];
+   char     codes[WE_TEAMS][4];
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -1790,25 +1800,50 @@ static void ksync_live_name(const uint8_t *ram, size_t addr, size_t cap,
    out[n] = '\0';
 }
 
-/* The team's name from the game's table - only there in some menus (and
-   some patches never renamed it): "" when it doesn't look like one. */
-static void ksync_live_team_name(const uint8_t *ram, unsigned team_id,
-      char *out, size_t cap)
+/* A team name or code as the select screen keeps it: 1 to cap-1 printable
+   characters, no lowercase (anything else is some other screen's data). */
+static bool ksync_live_plain(const char *s, size_t cap)
 {
-   const uint8_t *p = ram + WE_NAME_PTRS + 4 * team_id;
-   uint32_t ptr     = p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
-   size_t i, len;
+   size_t i, len = strlen(s);
 
-   out[0] = '\0';
-   if (ptr < 0x80000000u || ptr >= 0x80000000u + WE_RAM_SIZE)
-      return;
-   ksync_live_name(ram, ptr & 0x1FFFFF, 24, out, cap);
-   len = strlen(out);
+   if (len < 1 || len >= cap)
+      return false;
    for (i = 0; i < len; i++)
-      if (islower((unsigned char)out[i]))
+      if (islower((unsigned char)s[i]))
+         return false;
+   return true;
+}
+
+/* While the team select screen is up: every team's name and code, kept for
+   the match (which overwrites them). Taken only when the whole table reads
+   as one - from team 0 on, past both teams picked now. */
+static void ksync_live_capture_names(const uint8_t *ram)
+{
+   static char names[WE_TEAMS][17], codes[WE_TEAMS][4];
+   unsigned id, count = 0, need = ram[WE_TEAM_ID];
+
+   if (ram[WE_TEAM_ID + 1] > need)
+      need = ram[WE_TEAM_ID + 1];
+   for (id = 0; id < WE_TEAMS; id++)
+   {
+      const uint8_t *p = ram + WE_SEL_NAME_PTRS + 4 * id;
+      const uint8_t *c = ram + WE_SEL_CODES_END - 4 * id;
+      uint32_t ptr     = p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+      if (ptr < 0x80000000u || ptr >= 0x80000000u + WE_RAM_SIZE || c[3] != 0)
          break;
-   if (len < 2 || len > 16 || i < len)
-      out[0] = '\0';
+      ksync_live_name(ram, ptr & 0x1FFFFF, 24, names[id], sizeof(names[id]));
+      ksync_live_name(ram, WE_SEL_CODES_END - 4 * id, 4, codes[id], sizeof(codes[id]));
+      if (!ksync_live_plain(names[id], sizeof(names[id])) || strlen(codes[id]) != 3)
+         break;
+      count++;
+   }
+   if (count < 8 || count <= need)
+      return;
+   memcpy(ksync_live.names, names, sizeof(names));
+   memcpy(ksync_live.codes, codes, sizeof(codes));
+   for (id = count; id < WE_TEAMS; id++)
+      ksync_live.names[id][0] = ksync_live.codes[id][0] = '\0';
+   ksync_live.have_names = true;
 }
 
 /* Does the RAM hold a WE 2002 engine match? (Any other game - or WE in its
@@ -1853,12 +1888,13 @@ static uint32_t ksync_live_sig(const uint8_t *ram)
    return h;
 }
 
-/* The state for WE Camp (wg-camp's app/live.py parse_state()). */
+/* The state for WE Camp (wg-camp's app/live.py parse_state()). v2: the
+   teams' names come from the team select screen (what the players saw). */
 static bool ksync_live_json(const uint8_t *ram, unsigned frame, unsigned period,
       unsigned clock, bool final, char *out, size_t cap)
 {
    unsigned side, i;
-   int n = snprintf(out, cap, "{\"v\":1,\"content\":\"%s\",\"kickoff\":%u,"
+   int n = snprintf(out, cap, "{\"v\":2,\"content\":\"%s\",\"kickoff\":%u,"
          "\"frame\":%u,\"period\":%u,\"clock\":%u,\"half\":%u,\"final\":%d,"
          "\"pads\":[%u,%u,%u,%u],\"teams\":[",
          ksync_local.content, ksync_live.kickoff, frame, period, clock,
@@ -1869,11 +1905,12 @@ static bool ksync_live_json(const uint8_t *ram, unsigned frame, unsigned period,
    {
       const uint8_t *goals = ram + (side ? WE_GOALS_VISITA : WE_GOALS_LOCAL);
       size_t roster        = side ? WE_ROSTER_VISITA : WE_ROSTER_LOCAL;
-      char name[32];
+      unsigned team        = ram[WE_TEAM_ID + side];
+      bool known           = ksync_live.have_names && team < WE_TEAMS;
 
-      ksync_live_team_name(ram, ram[WE_TEAM_ID + side], name, sizeof(name));
-      n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"goals\":%u,"
-            "\"scorers\":[", side ? "," : "", ram[WE_TEAM_ID + side], name,
+      n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\","
+            "\"goals\":%u,\"scorers\":[", side ? "," : "", team,
+            known ? ksync_live.names[team] : "", known ? ksync_live.codes[team] : "",
             ram[WE_SCORE + side]);
       for (i = 0; i < 32 && goals[4 * i] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
@@ -1904,6 +1941,8 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
    bool final = false;
    uint32_t sig;
 
+   if (size == WE_RAM_SIZE && !ksync_live.active)
+      ksync_live_capture_names(ram);
    if (size != WE_RAM_SIZE || !ksync_live_valid(ram, &period, &clock))
    {
       ksync_live.active    = false;
