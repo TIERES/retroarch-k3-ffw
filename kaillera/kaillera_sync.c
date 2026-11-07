@@ -1824,6 +1824,7 @@ static struct
    unsigned armed;       /* kick_on_run: the clock set for a kickoff (0 = none) */
    unsigned team[2];     /* end_resets: the teams at the kickoff */
    unsigned over_since;  /* extra: frame the 2nd half's time ran out (0 = it hasn't) */
+   bool     extra;       /* in extra time (WE2002 plays it as periods 0 and 1 again) */
    unsigned prev_period;
    unsigned prev_clock;
    unsigned prev_in_play;
@@ -2027,7 +2028,8 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    int n = snprintf(out, cap, "{\"v\":2,\"engine\":\"%s\",\"content\":\"%s\",\"kickoff\":%u,"
          "\"frame\":%u,\"period\":%u,\"clock\":%u,\"half\":%u,\"final\":%d,"
          "\"pads\":[%u,%u,%u,%u],\"teams\":[",
-         map->serial, ksync_local.content, ksync_live.kickoff, frame, period, clock,
+         map->serial, ksync_local.content, ksync_live.kickoff, frame,
+         ksync_live.extra && !final ? period + 2 : period, clock,
          ksync_live.half, final ? 1 : 0, pads[0], pads[1], pads[2], pads[3]);
 
    for (side = 0; side < 2 && n > 0 && (size_t)n < cap; side++)
@@ -2076,6 +2078,7 @@ static void ksync_live_start(const uint8_t *st, const ksync_we_map *map,
    ksync_live.half         = half;
    ksync_live.armed        = 0;
    ksync_live.over_since   = 0;
+   ksync_live.extra        = false;
    ksync_live.team[0]      = st[map->team_id];
    ksync_live.team[1]      = st[map->team_id + 1];
    ksync_live.last_json[0] = '\0';
@@ -2109,7 +2112,16 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       if (period == 0 && clock >= KSYNC_LIVE_MIN_KICKOFF
             && clock >= ksync_live.prev_clock + KSYNC_LIVE_MIN_KICKOFF)
       {
-         if (map->kick_on_run)
+         /* Extra time: right after the 2nd half (period 1, clock 0) of the
+            match being played, WE2002 starts it as a new 1st half (period 0,
+            a shorter clock) with the score kept - the same match, sent as
+            periods 2 and 3. */
+         if (ksync_live.active && ksync_live.prev_period == 1 && ksync_live.prev_clock == 0)
+         {
+            ksync_live.extra = true;
+            ksync_live.half  = clock;
+         }
+         else if (map->kick_on_run)
          {
             ksync_live.active = false;
             ksync_live.armed  = clock;
