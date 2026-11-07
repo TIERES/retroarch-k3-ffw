@@ -2214,8 +2214,15 @@ void kailleraSyncAfterFrame(unsigned frame)
 
    frame           -= ksync_frame_base;
    ksync_last_frame = frame;
+   /* Placar ao vivo: only with the player logged into the WE Camp account
+      (the DLL says so) - otherwise the game's RAM isn't read for it. */
    if (frame % KSYNC_LIVE_SAMPLE_FRAMES == 0)
-      ksync_live_sample(ram, size, ksync_live_scratchpad(), frame);
+   {
+      if (kailleraLiveEnabledExternal())
+         ksync_live_sample(ram, size, ksync_live_scratchpad(), frame);
+      else if (ksync_live.active || ksync_live.have_prev)
+         ksync_live_reset();
+   }
    window           = frame / KSYNC_DIGEST_FRAMES;
    idx              = frame % KSYNC_DIGEST_FRAMES;
 
