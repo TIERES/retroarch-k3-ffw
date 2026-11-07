@@ -1736,24 +1736,29 @@ static int ksync_compare_states(ksync_peer_t *peer, char (*log)[320], int max_lo
    name, which the kernel keeps at WE_SERIAL; patches (CAN 2025, Euro vs
    Copa America, BR Turbo...) keep the engine's. Side 0 = the game's LOCAL
    team. */
-#define WE_RAM_SIZE 0x200000 /* PS1 main RAM: pcsx_rearmed only */
-#define WE_SERIAL   0x9E19   /* "SLPM_870.56" */
-#define WE_TEAMS    128
+#define WE_RAM_SIZE     0x200000 /* PS1 main RAM: pcsx_rearmed only */
+#define WE_SCRATCH      0x1F800000u /* the PS1 scratchpad (1 KB), in the core's memory map */
+#define WE_SCRATCH_SIZE 0x400
+#define WE_SERIAL       0x9E19   /* "SLPM_870.56" */
+#define WE_TEAMS        128
 
 typedef struct
 {
    const char *serial;
    const char *label;
+   bool     scratch;      /* team_id, period, clock and score are in the scratchpad (WE3) */
    size_t   team_id;      /* team slot, LOCAL then VISITA */
    size_t   period;       /* 0 = 1st half, 1 = 2nd */
    size_t   clock;        /* u16: frames left in the half (the half's length at kickoff) */
    size_t   in_play;      /* 1 while the ball rolls, 0 at half time/the end (0 = engine without it) */
    size_t   score;        /* goals, LOCAL then VISITA */
-   size_t   goals[2];     /* 32 x {scorer, assist (FF none), minute, 0}, FF = end */
+   size_t   goals[2];     /* 32 x {scorer, assist (FF none), minute[, 0]}, FF = end */
+   unsigned goal_size;    /* bytes per goal: 4 (WE3: 3) */
    size_t   roster[2];    /* player names, roster_len x name_len bytes */
+   size_t   roster_team;  /* WE3: one roster per team at roster[0] + team x this, not per side */
    unsigned roster_len;
    unsigned name_len;
-   size_t   pads;         /* pads 1-4: 0 LOCAL, 1 VISITA, FF none */
+   size_t   pads;         /* pads 1-4: 0 LOCAL, 1 VISITA, FF none (0 = no table: 1P LOCAL, 2P VISITA) */
    /* Team select screen only (the match overwrites them): a pointer per team
       to its name and either a pointer per team to its 3-letter code or the
       codes themselves, team 0 last, 4 bytes each ending at sel_codes. */
@@ -1761,20 +1766,33 @@ typedef struct
    size_t   sel_codes;
    bool     code_ptrs;
    bool     mixed_case;   /* team names in mixed case ("Portugal") */
+   /* WE3: the clock is set at the formation screen and only runs from the
+      kickoff on; at the end the score goes back to 0 with the period, and in
+      the menu after the final whistle (team still on screen) the teams can
+      already change. */
+   bool     kick_on_run;  /* kickoff = the clock starting to run, after the jump */
+   bool     end_resets;   /* the final = the sample before the period goes back to 0; teams kept from the kickoff */
+   size_t   extra;        /* u16: the time added after the clock reaches 0, counting down (0 = none) */
 } ksync_we_map;
 
 static const ksync_we_map ksync_we_maps[] = {
-   { "SLPM_870.56", "WE2002", 0x75564, 0x75566, 0x7591C, 0, 0x75702,
-     { 0x755C4, 0x75644 }, { 0x64570, 0x646E0 }, 23, 16, 0x758D9,
-     0xBF0E8, 0x800DC, false, false },
-   { "SLPM_862.91", "WE4", 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
-     { 0x75157, 0x751D7 }, { 0x7490C, 0x749E8 }, 22, 10, 0x75469,
-     0xA67C0, 0xA6AC0, true, true },
+   { "SLPM_870.56", "WE2002", false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
+     { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
+     0xBF0E8, 0x800DC, false, false, false, false, 0 },
+   { "SLPM_862.91", "WE4", false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
+     { 0x75157, 0x751D7 }, 4, { 0x7490C, 0x749E8 }, 0, 22, 10, 0x75469,
+     0xA67C0, 0xA6AC0, true, true, false, false, 0 },
+   /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
+      scratchpad offsets are from WE_SCRATCH. */
+   { "SLPM_861.62", "WE3", true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
+     { 0x107FE5, 0x108045 }, 3, { 0xC8504, 0 }, 0xB0, 22, 8, 0,
+     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
 #define KSYNC_LIVE_HEARTBEAT_FRAMES 900  /* and send at least every 15 s   */
 #define KSYNC_LIVE_MIN_KICKOFF      1800 /* a half of 30 s or more         */
+#define KSYNC_LIVE_OVER_FRAMES      600  /* WE3: 10 s with no time left = the end */
 #define KSYNC_LIVE_JSON_LEN         8192
 
 static struct
@@ -1783,11 +1801,15 @@ static struct
    bool     have_prev;
    unsigned kickoff;     /* frame of the 1st half's kickoff - the same on every PC; 0 = joined mid-match */
    unsigned half;        /* the half's length in frames (the clock at kickoff) */
+   unsigned armed;       /* kick_on_run: the clock set for a kickoff (0 = none) */
+   unsigned team[2];     /* end_resets: the teams at the kickoff */
+   unsigned over_since;  /* extra: frame the 2nd half's time ran out (0 = it hasn't) */
    unsigned prev_period;
    unsigned prev_clock;
    unsigned prev_in_play;
    uint32_t sent_sig;    /* what the last state sent had (without the clock) */
    unsigned sent_frame;
+   char     last_json[KSYNC_LIVE_JSON_LEN]; /* end_resets: the last sample's state */
    /* The teams' names and codes, read from the team select screen (the
       last time it was up this game) - the match itself only has the slot. */
    bool     have_names;
@@ -1801,15 +1823,38 @@ static void ksync_live_reset(void)
 }
 
 /* The engine running, from the executable name the kernel keeps - NULL for
-   any other game. */
-static const ksync_we_map *ksync_live_map(const uint8_t *ram)
+   any other game (or WE3 without the scratchpad). */
+static const ksync_we_map *ksync_live_map(const uint8_t *ram, const uint8_t *scratch)
 {
    size_t i;
 
    for (i = 0; i < sizeof(ksync_we_maps) / sizeof(ksync_we_maps[0]); i++)
       if (memcmp(ram + WE_SERIAL, ksync_we_maps[i].serial, 11) == 0)
-         return &ksync_we_maps[i];
+         return ksync_we_maps[i].scratch && !scratch ? NULL : &ksync_we_maps[i];
    return NULL;
+}
+
+/* The PS1 scratchpad from the core's memory map (pcsx_rearmed publishes it)
+   - NULL if it isn't there. */
+static const uint8_t *ksync_live_scratchpad(void)
+{
+   const rarch_memory_map_t *mmaps = &runloop_state_get_ptr()->system.mmaps;
+   unsigned i;
+
+   for (i = 0; i < mmaps->num_descriptors; i++)
+   {
+      const struct retro_memory_descriptor *d = &mmaps->descriptors[i].core;
+      if (d->start == WE_SCRATCH && d->ptr && d->len >= WE_SCRATCH_SIZE)
+         return (const uint8_t*)d->ptr + d->offset;
+   }
+   return NULL;
+}
+
+/* A team of the match: from the kickoff where the end resets them
+   (end_resets), from the RAM (st = the RAM or the scratchpad) otherwise. */
+static unsigned ksync_live_team(const uint8_t *st, const ksync_we_map *map, unsigned side)
+{
+   return map->end_resets ? ksync_live.team[side] : st[map->team_id + side];
 }
 
 static unsigned ksync_live_u16(const uint8_t *ram, size_t addr)
@@ -1869,13 +1914,14 @@ static size_t ksync_live_ptr(const uint8_t *ram, size_t addr)
 /* While the team select screen is up: every team's name and code, kept for
    the match (which overwrites them). Taken only when the whole table reads
    as one - from team 0 on, past both teams picked now. */
-static void ksync_live_capture_names(const uint8_t *ram, const ksync_we_map *map)
+static void ksync_live_capture_names(const uint8_t *ram, const uint8_t *st,
+      const ksync_we_map *map)
 {
    static char names[WE_TEAMS][17], codes[WE_TEAMS][4];
-   unsigned id, count = 0, need = ram[map->team_id];
+   unsigned id, count = 0, need = st[map->team_id];
 
-   if (ram[map->team_id + 1] > need)
-      need = ram[map->team_id + 1];
+   if (st[map->team_id + 1] > need)
+      need = st[map->team_id + 1];
    for (id = 0; id < WE_TEAMS; id++)
    {
       size_t name = ksync_live_ptr(ram, map->sel_names + 4 * id);
@@ -1899,43 +1945,45 @@ static void ksync_live_capture_names(const uint8_t *ram, const ksync_we_map *map
 }
 
 /* Does the RAM hold a match of this engine? (Its menus, with leftovers
-   there, fail one of these.) */
-static bool ksync_live_valid(const uint8_t *ram, const ksync_we_map *map,
-      unsigned *period, unsigned *clock)
+   there, fail one of these.) st = where team_id/period/clock/score are. */
+static bool ksync_live_valid(const uint8_t *ram, const uint8_t *st,
+      const ksync_we_map *map, unsigned *period, unsigned *clock)
 {
-   unsigned side, i;
+   unsigned side, i, gs = map->goal_size;
 
-   *period = ram[map->period];
-   *clock  = ksync_live_u16(ram, map->clock);
+   *period = st[map->period];
+   *clock  = ksync_live_u16(st, map->clock);
    if (*period > 4)
       return false;
-   for (i = 0; i < 4; i++)
+   for (i = 0; i < 4 && map->pads; i++)
       if (ram[map->pads + i] != 0 && ram[map->pads + i] != 1 && ram[map->pads + i] != 0xFF)
          return false;
    for (side = 0; side < 2; side++)
    {
       const uint8_t *goals = ram + map->goals[side];
-      if (ram[map->team_id + side] >= WE_TEAMS || ram[map->score + side] > 30)
+      if (st[map->team_id + side] >= WE_TEAMS || st[map->score + side] > 30)
          return false;
-      for (i = 0; i < 32 && goals[4 * i] != 0xFF; i++)
-         if (goals[4 * i] >= map->roster_len || goals[4 * i + 2] > 200)
+      for (i = 0; i < 32 && goals[gs * i] != 0xFF; i++)
+         if (goals[gs * i] >= map->roster_len || goals[gs * i + 2] > 200)
             return false;
    }
    return true;
 }
 
 /* What changed since the last send: everything but the clock. */
-static uint32_t ksync_live_sig(const uint8_t *ram, const ksync_we_map *map)
+static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map)
 {
    uint32_t h = 2166136261u;
    size_t i;
-#define KSYNC_LIVE_MIX(a, n) for (i = 0; i < (n); i++) h = (h ^ ram[(a) + i]) * 16777619u
-   KSYNC_LIVE_MIX(map->period, 1);
-   KSYNC_LIVE_MIX(map->pads, 4);
-   KSYNC_LIVE_MIX(map->team_id, 2);
-   KSYNC_LIVE_MIX(map->score, 2);
-   KSYNC_LIVE_MIX(map->goals[0], 128);
-   KSYNC_LIVE_MIX(map->goals[1], 128);
+#define KSYNC_LIVE_MIX(m, a, n) for (i = 0; i < (n); i++) h = (h ^ (m)[(a) + i]) * 16777619u
+   KSYNC_LIVE_MIX(st, map->period, 1);
+   if (map->pads)
+      KSYNC_LIVE_MIX(ram, map->pads, 4);
+   h = (h ^ ksync_live_team(st, map, 0)) * 16777619u;
+   h = (h ^ ksync_live_team(st, map, 1)) * 16777619u;
+   KSYNC_LIVE_MIX(st, map->score, 2);
+   KSYNC_LIVE_MIX(ram, map->goals[0], 32 * map->goal_size);
+   KSYNC_LIVE_MIX(ram, map->goals[1], 32 * map->goal_size);
 #undef KSYNC_LIVE_MIX
    return h;
 }
@@ -1943,37 +1991,39 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const ksync_we_map *map)
 /* The state for WE Camp (wg-camp's app/live.py parse_state()). v2: the
    teams' names come from the team select screen (what the players saw);
    engine = the game's executable name. */
-static bool ksync_live_json(const uint8_t *ram, const ksync_we_map *map,
+static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
       unsigned frame, unsigned period, unsigned clock, bool final, char *out, size_t cap)
 {
-   unsigned side, i;
+   static const uint8_t no_pads[4] = { 0, 1, 0xFF, 0xFF }; /* 1P LOCAL, 2P VISITA */
+   const uint8_t *pads = map->pads ? ram + map->pads : no_pads;
+   unsigned side, i, gs = map->goal_size;
    int n = snprintf(out, cap, "{\"v\":2,\"engine\":\"%s\",\"content\":\"%s\",\"kickoff\":%u,"
          "\"frame\":%u,\"period\":%u,\"clock\":%u,\"half\":%u,\"final\":%d,"
          "\"pads\":[%u,%u,%u,%u],\"teams\":[",
          map->serial, ksync_local.content, ksync_live.kickoff, frame, period, clock,
-         ksync_live.half, final ? 1 : 0, ram[map->pads], ram[map->pads + 1],
-         ram[map->pads + 2], ram[map->pads + 3]);
+         ksync_live.half, final ? 1 : 0, pads[0], pads[1], pads[2], pads[3]);
 
    for (side = 0; side < 2 && n > 0 && (size_t)n < cap; side++)
    {
       const uint8_t *goals = ram + map->goals[side];
-      size_t roster        = map->roster[side];
-      unsigned team        = ram[map->team_id + side];
+      unsigned team        = ksync_live_team(st, map, side);
+      size_t roster        = map->roster_team ? map->roster[0] + map->roster_team * team
+                           : map->roster[side];
       bool known           = ksync_live.have_names && team < WE_TEAMS;
 
       n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\","
             "\"goals\":%u,\"scorers\":[", side ? "," : "", team,
             known ? ksync_live.names[team] : "", known ? ksync_live.codes[team] : "",
-            ram[map->score + side]);
-      for (i = 0; i < 32 && goals[4 * i] != 0xFF && n > 0 && (size_t)n < cap; i++)
+            st[map->score + side]);
+      for (i = 0; i < 32 && goals[gs * i] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
          char scorer[20], assist[20];
-         ksync_live_name(ram, roster + map->name_len * goals[4 * i], map->name_len, scorer, sizeof(scorer));
+         ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
          assist[0] = '\0';
-         if (goals[4 * i + 1] < map->roster_len)
-            ksync_live_name(ram, roster + map->name_len * goals[4 * i + 1], map->name_len, assist, sizeof(assist));
+         if (goals[gs * i + 1] < map->roster_len)
+            ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
          n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"]", i ? "," : "",
-               scorer, goals[4 * i + 2], assist);
+               scorer, goals[gs * i + 2], assist);
       }
       if (n > 0 && (size_t)n < cap)
          n += snprintf(out + n, cap - n, "]}");
@@ -1987,17 +2037,32 @@ static bool ksync_live_json(const uint8_t *ram, const ksync_we_map *map,
    same on every PC): kickoff, goals, period changes and the end go to the
    DLL (kailleraLiveMatch(), which sends them to WE Camp), plus a state
    every 15 s for the card's clock. */
-static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
+static void ksync_live_start(const uint8_t *st, const ksync_we_map *map,
+      unsigned kickoff, unsigned half)
+{
+   ksync_live.active       = true;
+   ksync_live.kickoff      = kickoff;
+   ksync_live.half         = half;
+   ksync_live.armed        = 0;
+   ksync_live.over_since   = 0;
+   ksync_live.team[0]      = st[map->team_id];
+   ksync_live.team[1]      = st[map->team_id + 1];
+   ksync_live.last_json[0] = '\0';
+}
+
+static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *scratch,
+      unsigned frame)
 {
    char json[KSYNC_LIVE_JSON_LEN];
-   const ksync_we_map *map = size == WE_RAM_SIZE ? ksync_live_map(ram) : NULL;
+   const ksync_we_map *map = size == WE_RAM_SIZE ? ksync_live_map(ram, scratch) : NULL;
+   const uint8_t *st       = map && map->scratch ? scratch : ram;
    unsigned period, clock, in_play;
-   bool final = false;
+   bool final = false, final_before = false;
    uint32_t sig;
 
    if (map && !ksync_live.active)
-      ksync_live_capture_names(ram, map);
-   if (!map || !ksync_live_valid(ram, map, &period, &clock))
+      ksync_live_capture_names(ram, st, map);
+   if (!map || !ksync_live_valid(ram, st, map, &period, &clock))
    {
       ksync_live.active    = false;
       ksync_live.have_prev = false;
@@ -2008,21 +2073,24 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
    {
       /* Kickoff of the 1st half: the clock jumps up to the half's length
          (from 0, or - WE4, after a match left from the pause menu - from
-         where it went on counting down in the menus). */
+         where it went on counting down in the menus). WE3 sets it at the
+         formation screen - its kickoff is when it starts running. */
       if (period == 0 && clock >= KSYNC_LIVE_MIN_KICKOFF
             && clock >= ksync_live.prev_clock + KSYNC_LIVE_MIN_KICKOFF)
       {
-         ksync_live.active  = true;
-         ksync_live.kickoff = frame;
-         ksync_live.half    = clock;
+         if (map->kick_on_run)
+         {
+            ksync_live.active = false;
+            ksync_live.armed  = clock;
+         }
+         else
+            ksync_live_start(st, map, frame, clock);
       }
+      else if (ksync_live.armed && period == 0 && clock < ksync_live.prev_clock)
+         ksync_live_start(st, map, frame, ksync_live.armed);
       /* Joined mid-match (retry-connect): the clock is already running. */
       else if (!ksync_live.active && clock > 0 && clock < ksync_live.prev_clock && in_play)
-      {
-         ksync_live.active  = true;
-         ksync_live.kickoff = 0;
-         ksync_live.half    = 18000;
-      }
+         ksync_live_start(st, map, 0, 18000);
       else if (ksync_live.active && map->in_play)
       {
          /* WE4: the ball stops after the 2nd half with the clock at 0 - the
@@ -2035,9 +2103,32 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
                ksync_live.active = false;
          }
       }
-      /* WE2002: after the 2nd half the period goes back to 0, clock at 0. */
+      /* WE2002, WE3: after the 2nd half the period goes back to 0, clock at
+         0. WE3 resets the score with it - the end is the sample before. */
       else if (ksync_live.active && ksync_live.prev_period == 1 && period == 0 && clock == 0)
-         final = true;
+      {
+         if (!map->end_resets)
+            final = true;
+         else if (ksync_live.prev_clock == 0 && ksync_live.last_json[0])
+            final_before = true;
+         else
+            ksync_live.active = false;
+      }
+   }
+   /* WE3: the 2nd half's clock and added time at 0 for 10 s - the end (the
+      game may still add a little after the first 0; the period only goes
+      back to 0 when the players leave the menu after the result). */
+   if (ksync_live.active && map->extra && !final && !final_before)
+   {
+      if (period == 1 && clock == 0 && ksync_live_u16(st, map->extra) == 0)
+      {
+         if (!ksync_live.over_since)
+            ksync_live.over_since = frame;
+         else if (frame - ksync_live.over_since >= KSYNC_LIVE_OVER_FRAMES)
+            final = true;
+      }
+      else
+         ksync_live.over_since = 0;
    }
    ksync_live.have_prev    = true;
    ksync_live.prev_period  = period;
@@ -2046,7 +2137,21 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
    if (!ksync_live.active)
       return;
 
-   sig = ksync_live_sig(ram, map);
+   if (final_before)
+   {
+      char *f = strstr(ksync_live.last_json, "\"final\":0");
+      ksync_live.active = false;
+      if (f)
+      {
+         f[8] = '1';
+         kailleraLiveMatchExternal(ksync_live.last_json);
+      }
+      return;
+   }
+   if (map->end_resets && !ksync_live_json(ram, st, map, frame, period, clock, false,
+            ksync_live.last_json, sizeof(ksync_live.last_json)))
+      ksync_live.last_json[0] = '\0';
+   sig = ksync_live_sig(ram, st, map);
    if (!final && sig == ksync_live.sent_sig
          && frame - ksync_live.sent_frame < KSYNC_LIVE_HEARTBEAT_FRAMES)
       return;
@@ -2059,7 +2164,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, unsigned frame)
       period            = 1;
       clock             = 0;
    }
-   if (ksync_live_json(ram, map, frame, period, clock, final, json, sizeof(json)))
+   if (ksync_live_json(ram, st, map, frame, period, clock, final, json, sizeof(json)))
       kailleraLiveMatchExternal(json);
 }
 
@@ -2110,7 +2215,7 @@ void kailleraSyncAfterFrame(unsigned frame)
    frame           -= ksync_frame_base;
    ksync_last_frame = frame;
    if (frame % KSYNC_LIVE_SAMPLE_FRAMES == 0)
-      ksync_live_sample(ram, size, frame);
+      ksync_live_sample(ram, size, ksync_live_scratchpad(), frame);
    window           = frame / KSYNC_DIGEST_FRAMES;
    idx              = frame % KSYNC_DIGEST_FRAMES;
 
