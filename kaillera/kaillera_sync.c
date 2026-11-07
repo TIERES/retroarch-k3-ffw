@@ -1761,7 +1761,8 @@ typedef struct
    size_t   clock;        /* u16: frames left in the half (the half's length at kickoff) */
    size_t   in_play;      /* 1 while the ball rolls, 0 at half time/the end (0 = engine without it) */
    size_t   score;        /* goals, LOCAL then VISITA */
-   size_t   goals[2];     /* 32 x {scorer, assist (FF none), minute[, 0]}, FF = end */
+   size_t   goals[2];     /* 32 x {scorer, assist (FF none), minute[, 0]}, minute FF = end;
+                             scorer FF = own goal (the player isn't kept) */
    unsigned goal_size;    /* bytes per goal: 4 (WE3: 3) */
    size_t   roster[2];    /* player names, roster_len x name_len bytes */
    size_t   roster_team;  /* WE3: one roster per team at roster[0] + team x this, not per side */
@@ -1989,8 +1990,8 @@ static bool ksync_live_valid(const uint8_t *ram, const uint8_t *st,
       const uint8_t *goals = ram + map->goals[side];
       if (st[map->team_id + side] >= WE_TEAMS || st[map->score + side] > 30)
          return false;
-      for (i = 0; i < 32 && goals[gs * i] != 0xFF; i++)
-         if (goals[gs * i] >= map->roster_len || goals[gs * i + 2] > 200)
+      for (i = 0; i < 32 && goals[gs * i + 2] != 0xFF; i++)
+         if ((goals[gs * i] != 0xFF && goals[gs * i] >= map->roster_len) || goals[gs * i + 2] > 200)
             return false;
    }
    return true;
@@ -2041,10 +2042,14 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
             "\"goals\":%u,\"scorers\":[", side ? "," : "", team,
             known ? ksync_live.names[team] : "", known ? ksync_live.codes[team] : "",
             st[map->score + side]);
-      for (i = 0; i < 32 && goals[gs * i] != 0xFF && n > 0 && (size_t)n < cap; i++)
+      for (i = 0; i < 32 && goals[gs * i + 2] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
          char scorer[20], assist[20];
-         ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
+         /* Own goal: in the list of the team it counted for, without the player. */
+         if (goals[gs * i] == 0xFF)
+            strlcpy(scorer, "Gol contra", sizeof(scorer));
+         else
+            ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
          assist[0] = '\0';
          if (goals[gs * i + 1] < map->roster_len)
             ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
