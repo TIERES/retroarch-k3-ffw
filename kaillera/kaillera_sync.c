@@ -1742,10 +1742,19 @@ static int ksync_compare_states(ksync_peer_t *peer, char (*log)[320], int max_lo
 #define WE_SERIAL       0x9E19   /* "SLPM_870.56" */
 #define WE_TEAMS        128
 
+/* 16 bytes of the engine's own code at a fixed RAM address: patches that
+   rename the executable (World Cup 26 "WC26_5MX2") keep the engine's code. */
+typedef struct
+{
+   size_t  addr;
+   uint8_t bytes[16];
+} ksync_we_sig;
+
 typedef struct
 {
    const char *serial;
    const char *label;
+   ksync_we_sig sig[2];   /* the engine, when the executable name is another */
    bool     scratch;      /* team_id, period, clock and score are in the scratchpad (WE3) */
    size_t   team_id;      /* team slot, LOCAL then VISITA */
    size_t   period;       /* 0 = 1st half, 1 = 2nd */
@@ -1776,15 +1785,24 @@ typedef struct
 } ksync_we_map;
 
 static const ksync_we_map ksync_we_maps[] = {
-   { "SLPM_870.56", "WE2002", false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
+   { "SLPM_870.56", "WE2002",
+     { { 0x1701C, { 0x07, 0x00, 0x40, 0x12, 0x21, 0x20, 0xC0, 0x02, 0x21, 0x98, 0x40, 0x02, 0x21, 0x90, 0x00, 0x00 } },
+       { 0x1D038, { 0xB0, 0x70, 0x00, 0x0C, 0x20, 0x08, 0x06, 0x24, 0x0C, 0x00, 0x40, 0x14, 0x01, 0x00, 0x03, 0x24 } } },
+     false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0 },
-   { "SLPM_862.91", "WE4", false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
+   { "SLPM_862.91", "WE4",
+     { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
+       { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
+     false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
      { 0x75157, 0x751D7 }, 4, { 0x7490C, 0x749E8 }, 0, 22, 10, 0x75469,
      0xA67C0, 0xA6AC0, true, true, false, false, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
-   { "SLPM_861.62", "WE3", true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
+   { "SLPM_861.62", "WE3",
+     { { 0x1714C, { 0x80, 0x1F, 0x02, 0x3C, 0x98, 0x02, 0x42, 0x90, 0x80, 0x1F, 0x01, 0x3C, 0x9A, 0x02, 0x20, 0xA0 } },
+       { 0x1D19C, { 0x1C, 0x00, 0xB3, 0xAF, 0x4C, 0x00, 0xB3, 0x93, 0x11, 0x80, 0x07, 0x3C, 0x78, 0xC1, 0xE7, 0x24 } } },
+     true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
      { 0x107FE5, 0x108045 }, 3, { 0xC8504, 0 }, 0xB0, 22, 8, 0,
      0x1D1B48, 0x189B58, false, true, true, true, 0x2C8 },
 };
@@ -1797,6 +1815,7 @@ static const ksync_we_map ksync_we_maps[] = {
 
 static struct
 {
+   const ksync_we_map *map; /* the engine, once recognized (the game doesn't change mid-session) */
    bool     active;      /* a match is being played (kickoff seen, or joined mid-match) */
    bool     have_prev;
    unsigned kickoff;     /* frame of the 1st half's kickoff - the same on every PC; 0 = joined mid-match */
@@ -1822,16 +1841,23 @@ static void ksync_live_reset(void)
    memset(&ksync_live, 0, sizeof(ksync_live));
 }
 
-/* The engine running, from the executable name the kernel keeps - NULL for
-   any other game (or WE3 without the scratchpad). */
+/* The engine running - from the executable name the kernel keeps or, for
+   patches that renamed it, from two pieces of the engine's code - kept for
+   the session once found. NULL for any other game (or WE3 without the
+   scratchpad). */
 static const ksync_we_map *ksync_live_map(const uint8_t *ram, const uint8_t *scratch)
 {
    size_t i;
 
-   for (i = 0; i < sizeof(ksync_we_maps) / sizeof(ksync_we_maps[0]); i++)
-      if (memcmp(ram + WE_SERIAL, ksync_we_maps[i].serial, 11) == 0)
-         return ksync_we_maps[i].scratch && !scratch ? NULL : &ksync_we_maps[i];
-   return NULL;
+   for (i = 0; !ksync_live.map && i < sizeof(ksync_we_maps) / sizeof(ksync_we_maps[0]); i++)
+   {
+      const ksync_we_map *m = &ksync_we_maps[i];
+      if (memcmp(ram + WE_SERIAL, m->serial, 11) == 0
+            || (memcmp(ram + m->sig[0].addr, m->sig[0].bytes, 16) == 0
+               && memcmp(ram + m->sig[1].addr, m->sig[1].bytes, 16) == 0))
+         ksync_live.map = m;
+   }
+   return ksync_live.map && ksync_live.map->scratch && !scratch ? NULL : ksync_live.map;
 }
 
 /* The PS1 scratchpad from the core's memory map (pcsx_rearmed publishes it)
