@@ -1888,6 +1888,9 @@ static void ksync_live_reset(void)
 /* WE2002: a tied 2nd half / extra time the referee ended - extra time or the
    shootout starts within ~13 s; none this long (25 s) = the match ends a draw. */
 #define KSYNC_LIVE_DRAW_FRAMES 1500
+/* After the kickoff whistle, 5 s (real time) before the match goes to WE
+   Camp - leaving it before that (Start, wrong kits) doesn't count. */
+#define KSYNC_LIVE_GRACE_FRAMES 300
 
 /* Every frame of a match (map->touch only): who touched the ball last and
    whether a penalty kick is being taken, so a goal that just showed up in
@@ -2197,9 +2200,28 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    same on every PC): kickoff, goals, period changes and the end go to the
    DLL (kailleraLiveMatch(), which sends them to WE Camp), plus a state
    every 15 s for the card's clock. */
-static void ksync_live_start(const uint8_t *st, const ksync_we_map *map,
+static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
       unsigned kickoff, unsigned half)
 {
+   /* Only a match the players set up: a pad on each side (they picked the
+      sides and teams). The game's DEMO (CPU x CPU, left alone at the title
+      screen) has none - it isn't sent. Engines without the table: always. */
+   if (map->pads)
+   {
+      const uint8_t *pads = ram + map->pads;
+      bool local = false, visita = false;
+      unsigned i;
+      for (i = 0; i < 4; i++)
+      {
+         local  |= pads[i] == 0;
+         visita |= pads[i] == 1;
+      }
+      if (!local || !visita)
+      {
+         ksync_live.active = false;
+         return;
+      }
+   }
    ksync_live.active       = true;
    ksync_live.kickoff      = kickoff;
    ksync_live.half         = half;
@@ -2263,13 +2285,13 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             ksync_live.armed  = clock;
          }
          else
-            ksync_live_start(st, map, frame, clock);
+            ksync_live_start(ram, st, map, frame, clock);
       }
       else if (ksync_live.armed && period == 0 && clock < ksync_live.prev_clock)
-         ksync_live_start(st, map, frame, ksync_live.armed);
+         ksync_live_start(ram, st, map, frame, ksync_live.armed);
       /* Joined mid-match (retry-connect): the clock is already running. */
       else if (!ksync_live.active && clock > 0 && clock < ksync_live.prev_clock && in_play)
-         ksync_live_start(st, map, 0, 18000);
+         ksync_live_start(ram, st, map, 0, 18000);
       else if (ksync_live.active && map->in_play)
       {
          /* WE4: the ball stops after the 2nd half with the clock at 0 - the
@@ -2406,6 +2428,11 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.prev_clock   = clock;
    ksync_live.prev_in_play = in_play;
    if (!ksync_live.active)
+      return;
+   /* The first seconds after the kickoff: nothing goes yet - the players may
+      still leave the match (wrong kits...) and start it again without it
+      counting (no card, no interrupted match). */
+   if (ksync_live.kickoff && frame - ksync_live.kickoff < KSYNC_LIVE_GRACE_FRAMES && !final && !final_before)
       return;
 
    if (final_before)
