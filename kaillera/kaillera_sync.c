@@ -1796,7 +1796,13 @@ typedef struct
       the penalty goals (0 = engine without them). */
    size_t   touch;
    size_t   setpiece;
+   /* WE2002: the match's state - 1 ball in play, 7 goal, 11 celebration,
+      0 kickoff setup, 10 the referee ended the period (half time, the end
+      of the match or of extra time, a golden goal, the shootout's end) -
+      0 = engine without it. */
+   size_t   state;
 } ksync_we_map;
+#define WE_STATE_OVER 10
 
 static const ksync_we_map ksync_we_maps[] = {
    { "SLPM_870.56", "WE2002",
@@ -1804,13 +1810,13 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D038, { 0xB0, 0x70, 0x00, 0x0C, 0x20, 0x08, 0x06, 0x24, 0x0C, 0x00, 0x40, 0x14, 0x01, 0x00, 0x03, 0x24 } } },
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
-     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499 },
+     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
      false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
      { 0x75157, 0x751D7 }, 4, { 0x7490C, 0x749E8 }, 0, 22, 10, 0x75469,
-     0xA67C0, 0xA6AC0, true, true, false, false, 0, 0, 0, 0, 0, 0 },
+     0xA67C0, 0xA6AC0, true, true, false, false, 0, 0, 0, 0, 0, 0, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1818,7 +1824,7 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D19C, { 0x1C, 0x00, 0xB3, 0xAF, 0x4C, 0x00, 0xB3, 0x93, 0x11, 0x80, 0x07, 0x3C, 0x78, 0xC1, 0xE7, 0x24 } } },
      true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
      { 0x107FE5, 0x108045 }, 3, { 0xC8504, 0 }, 0xB0, 22, 8, 0,
-     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8, 0, 0, 0, 0, 0 },
+     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8, 0, 0, 0, 0, 0, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -1862,9 +1868,11 @@ static struct
    unsigned et_goals;       /* WE2002 extra time: goals seen (both teams) ... */
    unsigned gg_clock;       /* ... and the clock + 1 when the last one came in, while it hasn't
                                moved since (a golden goal ends the match there) - 0 = none */
-   bool     decided;        /* the last sample: a decided shootout or a golden goal */
+   bool     decided;        /* the last sample: a decided shootout, a golden goal or a period the
+                               referee ended that may be the match's end (map->state) */
    unsigned prev_phase;
    unsigned prev_score[2];
+   unsigned over_frame;     /* map->state: the frame a tied 2nd half / extra time ended (0 = not) */
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -1877,6 +1885,9 @@ static void ksync_live_reset(void)
 #define KSYNC_LIVE_PEN_FRAMES 30
 /* WE2002's shootout: its state at a miss's value this long, score decided = over (20 s). */
 #define KSYNC_LIVE_SHOOTOUT_IDLE 1200
+/* WE2002: a tied 2nd half / extra time the referee ended - extra time or the
+   shootout starts within ~13 s; none this long (25 s) = the match ends a draw. */
+#define KSYNC_LIVE_DRAW_FRAMES 1500
 
 /* Every frame of a match (map->touch only): who touched the ball last and
    whether a penalty kick is being taken, so a goal that just showed up in
@@ -2080,8 +2091,11 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksyn
    size_t i;
 #define KSYNC_LIVE_MIX(m, a, n) for (i = 0; i < (n); i++) h = (h ^ (m)[(a) + i]) * 16777619u
    KSYNC_LIVE_MIX(st, map->period, 1);
-   /* The half's clock starting to run (the card leaves "Intervalo" then). */
+   /* The half's clock starting to run (the card leaves "Intervalo" then) and
+      the referee ending the period (it goes into "Intervalo"). */
    h = (h ^ (unsigned)(ksync_live.half && clock >= ksync_live.half)) * 16777619u;
+   if (map->state)
+      h = (h ^ (unsigned)(ram[map->state] == WE_STATE_OVER)) * 16777619u;
    /* An own goal's scorer / a penalty mark (ksync_live_goal_watch()). */
    KSYNC_LIVE_MIX(ksync_live.goal_og[0], 0, 32);
    KSYNC_LIVE_MIX(ksync_live.goal_og[1], 0, 32);
@@ -2122,6 +2136,9 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    /* The penalty shootout's score (LOCAL, VISITA), once it starts. */
    if (map->pens && n > 0 && (size_t)n < cap && (shootout || ram[map->pens] || ram[map->pens + 1]))
       n += snprintf(out + n, cap - n, "\"pens\":[%u,%u],", ram[map->pens], ram[map->pens + 1]);
+   /* The referee ended the period (map->state) - "Intervalo" only from then. */
+   if (map->state && n > 0 && (size_t)n < cap)
+      n += snprintf(out + n, cap - n, "\"over\":%d,", ram[map->state] == WE_STATE_OVER ? 1 : 0);
    if (n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "\"teams\":[");
 
@@ -2284,6 +2301,31 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             ksync_live.active = false;
       }
    }
+   /* WE2002: the referee ended the period (map->state). The 2nd half or extra
+      time with a winner, a golden goal (extra time's clock still running) or
+      the decided shootout - the end; tied, extra time or the shootout follow
+      (the phase goes up) or, KSYNC_LIVE_DRAW_FRAMES later, it's a draw. */
+   if (ksync_live.active && map->state && map->phase && !final && !final_before
+         && ram[map->state] == WE_STATE_OVER)
+   {
+      unsigned phase = ram[map->phase];
+      if (phase == 4)
+      {
+         if (ram[map->pens] != ram[map->pens + 1])
+            final = true;
+      }
+      else if (phase == 1 || phase == 3 || (phase == 2 && clock > 0))
+      {
+         if (st[map->score] != st[map->score + 1])
+            final = true;
+         else if (!ksync_live.over_frame)
+            ksync_live.over_frame = frame;
+         else if (frame - ksync_live.over_frame >= KSYNC_LIVE_DRAW_FRAMES)
+            final = true;
+      }
+   }
+   else
+      ksync_live.over_frame = 0;
    /* WE2002 extra time: a goal after which the clock never runs again is a
       golden goal (the game shows the result and goes back to the menus). */
    if (ksync_live.active && map->phase && (ram[map->phase] == 2 || ram[map->phase] == 3))
@@ -2310,7 +2352,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    if (ksync_live.active && !map->end_resets && !final && !final_before && ksync_live.have_prev
          && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]
             || st[map->score] < ksync_live.prev_score[0] || st[map->score + 1] < ksync_live.prev_score[1]
-            || (ksync_live.decided && map->phase && ram[map->phase] != ksync_live.prev_phase)))
+            || (ksync_live.decided && map->phase && ram[map->phase] < ksync_live.prev_phase)))
    {
       if (ksync_live.decided && ksync_live.last_json[0])
          final_before = true;
@@ -2320,7 +2362,10 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.decided = map->phase
          && ((ram[map->phase] == 4 && ram[map->pens] != ram[map->pens + 1])
             || ((ram[map->phase] == 2 || ram[map->phase] == 3) && ksync_live.gg_clock > 1 /* clock running */
-               && st[map->score] != st[map->score + 1]));
+               && st[map->score] != st[map->score + 1])
+            || (map->state && ram[map->state] == WE_STATE_OVER
+               && (ram[map->phase] == 1 || ram[map->phase] == 3 || ram[map->phase] == 4
+                  || (ram[map->phase] == 2 && clock > 0))));
    ksync_live.prev_phase    = map->phase ? ram[map->phase] : 0;
    ksync_live.prev_score[0] = st[map->score];
    ksync_live.prev_score[1] = st[map->score + 1];
@@ -2376,7 +2421,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    }
    /* The sample before the end: WE3's, and WE2002's extra time and shootout
       (a golden goal / the shootout left from the result screen - other teams). */
-   if ((map->end_resets || (map->phase && ram[map->phase] >= 2 && ram[map->phase] <= 4))
+   if ((map->end_resets || map->phase)
          && !ksync_live_json(ram, st, map, frame, period, clock, false,
             ksync_live.last_json, sizeof(ksync_live.last_json)))
       ksync_live.last_json[0] = '\0';
