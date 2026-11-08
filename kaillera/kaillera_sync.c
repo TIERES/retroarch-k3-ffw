@@ -1857,6 +1857,8 @@ static struct
    unsigned goal_count[2];  /* goals already seen, per side */
    uint8_t  goal_og[2][32]; /* own goal: the scorer's roster index + 1 (0 = unknown) */
    bool     goal_pen[2][32];
+   uint32_t so_state;       /* WE2002 shootout: pens + state byte, and since when */
+   unsigned so_since;
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -1867,6 +1869,8 @@ static void ksync_live_reset(void)
 /* A goal right after a penalty kick (the set piece is still "penalty" until
    the goal's frame) is a penalty goal. */
 #define KSYNC_LIVE_PEN_FRAMES 30
+/* WE2002's shootout: its state at a miss's value this long, score decided = over (20 s). */
+#define KSYNC_LIVE_SHOOTOUT_IDLE 1200
 
 /* Every frame of a match (map->touch only): who touched the ball last and
    whether a penalty kick is being taken, so a goal that just showed up in
@@ -2215,8 +2219,10 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          /* Extra time: right after the 2nd half (period 1, clock 0) of the
             match being played, WE2002 starts it as a new 1st half (period 0,
             a shorter clock) with the score kept - the same match, sent as
-            periods 2 and 3. */
-         if (ksync_live.active && ksync_live.prev_period == 1 && ksync_live.prev_clock == 0)
+            periods 2 and 3. Its phase is 2 by then: a sample may land on the
+            period already back to 0 with the clock still at 0. */
+         if (ksync_live.active && ((ksync_live.prev_period == 1 && ksync_live.prev_clock == 0)
+               || (map->phase && (ram[map->phase] == 2 || ram[map->phase] == 3))))
          {
             ksync_live.extra = true;
             ksync_live.half  = clock;
@@ -2251,10 +2257,11 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       else if (ksync_live.active && ksync_live.prev_period == 1 && period == 0 && clock == 0)
       {
          /* WE2002: the period also goes back to 0 when a tied match goes to
-            the penalty shootout (phase 4) - the end comes after it. */
-         if (map->phase && ram[map->phase] == 4)
+            extra time (phase 2, already set) or to the penalty shootout
+            (phase 4) - the end comes after them. */
+         if (map->phase && (ram[map->phase] == 2 || ram[map->phase] == 4))
          {
-            /* shootout: wait for the kicker to go to FF */
+            /* extra time / shootout: not the end yet */
          }
          else if (!map->end_resets)
             final = true;
@@ -2264,10 +2271,36 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             ksync_live.active = false;
       }
    }
-   /* WE2002 penalty shootout: over when the kicker goes to FF (score decided). */
-   if (ksync_live.active && map->kicker && map->phase && ram[map->phase] == 4
-         && ram[map->kicker] == 0xFF && ram[map->pens] != ram[map->pens + 1])
-      final = true;
+   /* The game left the match (back to the menus: other teams) - WE2002's
+      shootout ends like that when its state byte doesn't go to FF: the end
+      is the sample before, with the match's teams; otherwise the match was
+      left. WE3 keeps the kickoff's teams (end_resets). */
+   if (ksync_live.active && !map->end_resets && !final && !final_before
+         && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]))
+   {
+      if (map->phase && ram[map->phase] == 4 && ram[map->pens] != ram[map->pens + 1]
+            && ksync_live.last_json[0])
+         final_before = true;
+      else
+         ksync_live.active = false;
+   }
+   /* WE2002 penalty shootout: over when its state byte (map->kicker: 9 while
+      the kicks go on, 11/13 for ~6 s after a miss) goes to FF or, the score
+      decided, stays at a miss's value for KSYNC_LIVE_SHOOTOUT_IDLE frames
+      (the last kick missed - the game shows the result). */
+   if (ksync_live.active && !final_before && map->kicker && map->phase && ram[map->phase] == 4)
+   {
+      uint32_t so = (uint32_t)ram[map->pens] | ram[map->pens + 1] << 8 | (uint32_t)ram[map->kicker] << 16;
+      if (so != ksync_live.so_state || !ksync_live.so_since)
+      {
+         ksync_live.so_state = so;
+         ksync_live.so_since = frame;
+      }
+      if (ram[map->pens] != ram[map->pens + 1] && (ram[map->kicker] == 0xFF
+            || (ram[map->kicker] != 0 && ram[map->kicker] != 9
+               && frame - ksync_live.so_since >= KSYNC_LIVE_SHOOTOUT_IDLE)))
+         final = true;
+   }
    /* WE3: the 2nd half's clock and added time at 0 for 10 s - the end (the
       game may still add a little after the first 0; the period only goes
       back to 0 when the players leave the menu after the result). */
@@ -2301,7 +2334,10 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       }
       return;
    }
-   if (map->end_resets && !ksync_live_json(ram, st, map, frame, period, clock, false,
+   /* The sample before the end: WE3's, and WE2002's shootout (left from its
+      result screen - other teams). */
+   if ((map->end_resets || (map->phase && ram[map->phase] == 4))
+         && !ksync_live_json(ram, st, map, frame, period, clock, false,
             ksync_live.last_json, sizeof(ksync_live.last_json)))
       ksync_live.last_json[0] = '\0';
    sig = ksync_live_sig(ram, st, map, clock);
