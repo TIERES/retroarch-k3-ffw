@@ -1746,6 +1746,9 @@ static int ksync_compare_states(ksync_peer_t *peer, char (*log)[320], int max_lo
 #define WE_SCRATCH_SIZE 0x400
 #define WE_SERIAL       0x9E19   /* "SLPM_870.56" */
 #define WE_TEAMS        128
+/* A map field in the scratchpad (WE3's state, phase, shootout...): its
+   offset there with this flag - the others are RAM offsets. */
+#define WE_SCR          0x40000000u
 
 /* 16 bytes of the engine's own code at a fixed RAM address: patches that
    rename the executable (World Cup 26 "WC26_5MX2") keep the engine's code. */
@@ -1804,9 +1807,28 @@ typedef struct
    /* WE2002: the match's state - 1 ball in play, 7 goal, 11 celebration,
       0 kickoff setup, 10 the referee ended the period (half time, the end
       of the match or of extra time, a golden goal, the shootout's end) -
-      0 = engine without it. */
+      0 = engine without it. WE3 the same (8 = the shootout). */
    size_t   state;
+   /* The set piece's value while a penalty kick is taken (WE2002 2) and the
+      state it needs then (WE3: 2, a free kick or penalty) - 0xFF = any. */
+   unsigned pen_value;
+   unsigned pen_state;
+   /* WE3: 1 inside a match - from the formation until the players leave it
+      (through half time, extra time, the shootout and the result screens);
+      going to 0 = they left it (0 = engine without it). */
+   size_t   in_match;
+   /* WE3: the attract-mode DEMO (CPU x CPU at the title screen) runs a real
+      match - this byte is demo_value then; never sent (0 = no such byte). */
+   size_t   demo;
+   unsigned demo_value;
+   /* WE3: the match's settings - bit 0 extra time, bit 1 golden goal, bit 2
+      penalties - so a tied period's end is known at once (0 = engine
+      without them: WE2002 waits to see what follows). */
+   size_t   settings;
 } ksync_we_map;
+#define WE_SET_EXTRA  1
+#define WE_SET_GOLDEN 2
+#define WE_SET_PENS   4
 #define WE_STATE_OVER 10
 
 static const ksync_we_map ksync_we_maps[] = {
@@ -1815,13 +1837,19 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D038, { 0xB0, 0x70, 0x00, 0x0C, 0x20, 0x08, 0x06, 0x24, 0x0C, 0x00, 0x40, 0x14, 0x01, 0x00, 0x03, 0x24 } } },
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
-     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782 },
+     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
+     2, 0xFF, 0, 0, 0, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
      false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
      { 0x75157, 0x751D7 }, 4, { 0x7490C, 0x749E8 }, 0, 22, 10, 0x75469,
-     0xA67C0, 0xA6AC0, true, true, false, false, 0, 0, 0, 0, 0, 0, 0 },
+     0xA67C0, 0xA6AC0, true, true, false, false, 0,
+     /* Phase (as WE2002's), shootout score, last touch (slot 1-22: 1-11
+        LOCAL in phases 0/2 and the shootout, VISITA in 1/3), the restart
+        (3 = a penalty, with the state at 2), the state and the settings. */
+     0x7529F, 0x7529D, 0, 0x7B3DD, 0x75313, 0x75312,
+     3, 2, 0, 0, 0, 0x72FD2 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1829,7 +1857,13 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D19C, { 0x1C, 0x00, 0xB3, 0xAF, 0x4C, 0x00, 0xB3, 0x93, 0x11, 0x80, 0x07, 0x3C, 0x78, 0xC1, 0xE7, 0x24 } } },
      true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
      { 0x107FE5, 0x108045 }, 3, { 0xC8504, 0 }, 0xB0, 22, 8, 0,
-     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8, 0, 0, 0, 0, 0, 0 },
+     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8,
+     /* The period byte is the phase itself (0/1 halves, 2/3 extra time, 4
+        the shootout); shootout score, last touch (slot 1-22: 1-11 LOCAL in
+        periods 0/2, VISITA in 1/3), the restart (3 = a penalty, with the
+        state at 2) and the state - all in the scratchpad. */
+     WE_SCR | 0x2DF, WE_SCR | 0x2DB, 0, WE_SCR | 0x2AC, WE_SCR | 0x29B, WE_SCR | 0x29A,
+     3, 2, WE_SCR | 0x198, 0x10A2C2, 1, 0x10A307 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -1879,6 +1913,10 @@ static struct
    unsigned prev_score[2];
    unsigned over_frame;     /* map->state: the frame a tied 2nd half / extra time ended (0 = not) */
    unsigned whistle;        /* map->state: the kickoff whistle's frame (the ball in play) - 0 = not yet */
+   unsigned prev_in_match;  /* map->in_match, the last sample */
+   unsigned run_phase;      /* the phase + 1 the clock was last seen running in (0 = none) */
+   unsigned drop_frame;     /* WE4: the ball stopped without the referee's whistle, since (0 = not) */
+   bool     so_seen;        /* this match reached the shootout (its score is sent from then on) */
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -1886,9 +1924,10 @@ static void ksync_live_reset(void)
    memset(&ksync_live, 0, sizeof(ksync_live));
 }
 
-/* A goal right after a penalty kick (the set piece is still "penalty" until
-   the goal's frame) is a penalty goal. */
-#define KSYNC_LIVE_PEN_FRAMES 30
+/* A goal right after a penalty kick is a penalty goal: WE2002's set piece is
+   still "penalty" until the goal's frame; WE3's ends at the kick, the goal
+   ~30 frames later. */
+#define KSYNC_LIVE_PEN_FRAMES 90
 /* WE2002's shootout: its state at a miss's value this long, score decided = over (20 s). */
 #define KSYNC_LIVE_SHOOTOUT_IDLE 1200
 /* WE2002: a tied 2nd half / extra time the referee ended - extra time or the
@@ -1897,21 +1936,28 @@ static void ksync_live_reset(void)
 /* After the kickoff whistle, 5 s (real time) before the match goes to WE
    Camp - leaving it before that (Start, wrong kits) doesn't count. */
 #define KSYNC_LIVE_GRACE_FRAMES 300
+/* WE4: the ball stopped this long without the referee ending the period -
+   they left the match from the pause menu. */
+#define KSYNC_LIVE_LEFT_FRAMES 60
 
 /* Every frame of a match (map->touch only): who touched the ball last and
    whether a penalty kick is being taken, so a goal that just showed up in
    the records gets its own-goal scorer and its penalty mark - the sample
    twice a second would be too late for either. */
-static void ksync_live_goal_watch(const uint8_t *ram, unsigned frame)
+static unsigned ksync_live_b(const uint8_t *ram, const uint8_t *sc, size_t addr);
+
+static void ksync_live_goal_watch(const uint8_t *ram, const uint8_t *sc, unsigned frame)
 {
    const ksync_we_map *map = ksync_live.map;
-   unsigned side, i, n;
+   unsigned side, i, n, touch;
 
-   if (!ksync_live.active || !map || !map->touch)
+   if (!ksync_live.active || !map || !map->touch || (map->scratch && !sc))
       return;
-   if (ram[map->touch] >= 1 && ram[map->touch] <= 22)
-      ksync_live.last_touch = ram[map->touch];
-   if (map->setpiece && ram[map->setpiece] == 2)
+   touch = ksync_live_b(ram, sc, map->touch);
+   if (touch >= 1 && touch <= 22)
+      ksync_live.last_touch = touch;
+   if (map->setpiece && ksync_live_b(ram, sc, map->setpiece) == map->pen_value
+         && (map->pen_state == 0xFF || ksync_live_b(ram, sc, map->state) == map->pen_state))
       ksync_live.pen_frame = frame;
    for (side = 0; side < 2; side++)
    {
@@ -1982,6 +2028,15 @@ static unsigned ksync_live_team(const uint8_t *st, const ksync_we_map *map, unsi
 static unsigned ksync_live_u16(const uint8_t *ram, size_t addr)
 {
    return ram[addr] | (ram[addr + 1] << 8);
+}
+
+/* A byte of a map field: the RAM's or, for a WE_SCR field, the scratchpad's
+   (sc - for the maps with such fields, st is the scratchpad). */
+static unsigned ksync_live_b(const uint8_t *ram, const uint8_t *sc, size_t addr)
+{
+   if (addr & WE_SCR)
+      return sc ? sc[addr & (WE_SCRATCH_SIZE - 1)] : 0;
+   return ram[addr];
 }
 
 static uint32_t ksync_live_u32(const uint8_t *ram, size_t addr)
@@ -2104,7 +2159,7 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksyn
       the referee ending the period (it goes into "Intervalo"). */
    h = (h ^ (unsigned)(ksync_live.half && clock >= ksync_live.half)) * 16777619u;
    if (map->state)
-      h = (h ^ (unsigned)(ram[map->state] == WE_STATE_OVER)) * 16777619u;
+      h = (h ^ (unsigned)(ksync_live_b(ram, st, map->state) == WE_STATE_OVER)) * 16777619u;
    /* An own goal's scorer / a penalty mark (ksync_live_goal_watch()). */
    KSYNC_LIVE_MIX(ksync_live.goal_og[0], 0, 32);
    KSYNC_LIVE_MIX(ksync_live.goal_og[1], 0, 32);
@@ -2114,9 +2169,12 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksyn
    h = (h ^ ksync_live_team(st, map, 1)) * 16777619u;
    KSYNC_LIVE_MIX(st, map->score, 2);
    if (map->phase)
-      KSYNC_LIVE_MIX(ram, map->phase, 1);
+      h = (h ^ ksync_live_b(ram, st, map->phase)) * 16777619u;
    if (map->pens)
-      KSYNC_LIVE_MIX(ram, map->pens, 2);
+   {
+      h = (h ^ ksync_live_b(ram, st, map->pens)) * 16777619u;
+      h = (h ^ ksync_live_b(ram, st, map->pens + 1)) * 16777619u;
+   }
    KSYNC_LIVE_MIX(ram, map->goals[0], 32 * map->goal_size);
    KSYNC_LIVE_MIX(ram, map->goals[1], 32 * map->goal_size);
 #undef KSYNC_LIVE_MIX
@@ -2132,22 +2190,26 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    static const uint8_t no_pads[4] = { 0, 1, 0xFF, 0xFF }; /* 1P LOCAL, 2P VISITA */
    const uint8_t *pads = map->pads ? ram + map->pads : no_pads;
    unsigned side, i, gs = map->goal_size;
-   bool shootout = map->phase && ram[map->phase] == 4;
-   /* Period sent: 0/1 halves, 2/3 extra time, 4 penalties - WE2002's phase
-      itself; the others, extra time as seen (ksync_live.extra). */
+   unsigned phase = map->phase ? ksync_live_b(ram, st, map->phase) : 0;
+   bool shootout  = map->phase && phase == 4;
+   /* Period sent: 0/1 halves, 2/3 extra time, 4 penalties - the phase itself
+      (WE2002's, WE3's period); the others, extra time as seen (ksync_live.extra). */
    unsigned sent = final ? (shootout ? 4 : period)
-                 : map->phase ? ram[map->phase] : ksync_live.extra ? period + 2 : period;
+                 : map->phase ? phase : ksync_live.extra ? period + 2 : period;
    int n = snprintf(out, cap, "{\"v\":2,\"engine\":\"%s\",\"content\":\"%s\",\"kickoff\":%u,"
          "\"frame\":%u,\"period\":%u,\"clock\":%u,\"half\":%u,\"final\":%d,"
          "\"pads\":[%u,%u,%u,%u],",
          map->serial, ksync_local.content, ksync_live.kickoff, frame, sent, clock,
          ksync_live.half, final ? 1 : 0, pads[0], pads[1], pads[2], pads[3]);
-   /* The penalty shootout's score (LOCAL, VISITA), once it starts. */
-   if (map->pens && n > 0 && (size_t)n < cap && (shootout || ram[map->pens] || ram[map->pens + 1]))
-      n += snprintf(out + n, cap - n, "\"pens\":[%u,%u],", ram[map->pens], ram[map->pens + 1]);
+   /* The penalty shootout's score (LOCAL, VISITA), once it starts (WE3
+      keeps the last one until the next shootout - only this match's). */
+   if (map->pens && n > 0 && (size_t)n < cap && (shootout || ksync_live.so_seen))
+      n += snprintf(out + n, cap - n, "\"pens\":[%u,%u],", ksync_live_b(ram, st, map->pens),
+            ksync_live_b(ram, st, map->pens + 1));
    /* The referee ended the period (map->state) - "Intervalo" only from then. */
    if (map->state && n > 0 && (size_t)n < cap)
-      n += snprintf(out + n, cap - n, "\"over\":%d,", ram[map->state] == WE_STATE_OVER ? 1 : 0);
+      n += snprintf(out + n, cap - n, "\"over\":%d,",
+            ksync_live_b(ram, st, map->state) == WE_STATE_OVER ? 1 : 0);
    if (n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "\"teams\":[");
 
@@ -2175,9 +2237,13 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
          if (goals[gs * i] == 0xFF)
          {
             strlcpy(scorer, "Gol contra", sizeof(scorer));
-            if (ksync_live.goal_og[side][i] && !map->roster_team)
+            if (ksync_live.goal_og[side][i])
             {
-               ksync_live_name(ram, map->roster[!side] + map->name_len * (ksync_live.goal_og[side][i] - 1),
+               /* WE3 keeps a roster per team, not per side. */
+               size_t other = map->roster_team
+                            ? map->roster[0] + map->roster_team * ksync_live_team(st, map, !side)
+                            : map->roster[!side];
+               ksync_live_name(ram, other + map->name_len * (ksync_live.goal_og[side][i] - 1),
                      map->name_len, assist, sizeof(assist));
                kind = "og";
             }
@@ -2225,10 +2291,21 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
       if (!local || !visita)
       {
          ksync_live.active = false;
+         ksync_live.armed  = 0;
          return;
       }
    }
+   /* WE3 has no such table, but marks its DEMO. */
+   if (map->demo && ram[map->demo] == map->demo_value)
+   {
+      ksync_live.active = false;
+      ksync_live.armed  = 0;
+      return;
+   }
    ksync_live.active       = true;
+   ksync_live.so_seen      = false;
+   ksync_live.run_phase    = 0;
+   ksync_live.drop_frame   = 0;
    ksync_live.kickoff      = kickoff;
    ksync_live.half         = half;
    ksync_live.armed        = 0;
@@ -2253,8 +2330,8 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    char json[KSYNC_LIVE_JSON_LEN];
    const ksync_we_map *map = size == WE_RAM_SIZE ? ksync_live_map(ram, scratch) : NULL;
    const uint8_t *st       = map && map->scratch ? scratch : ram;
-   unsigned period, clock, in_play;
-   bool final = false, final_before = false;
+   unsigned period, clock, in_play, in_match, phase, state, set;
+   bool final = false, final_before = false, time_up, golden;
    uint32_t sig;
 
    if (map && !ksync_live.active)
@@ -2265,7 +2342,10 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       ksync_live.have_prev = false;
       return;
    }
-   in_play = map->in_play ? ram[map->in_play] : 1;
+   in_play  = map->in_play ? ram[map->in_play] : 1;
+   in_match = map->in_match ? ksync_live_b(ram, st, map->in_match) : 1;
+   phase    = map->phase ? ksync_live_b(ram, st, map->phase) : 0;
+   state    = map->state ? ksync_live_b(ram, st, map->state) : 0xFF;
    if (ksync_live.have_prev)
    {
       /* Kickoff of the 1st half: the clock jumps up to the half's length
@@ -2281,7 +2361,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             periods 2 and 3. Its phase is 2 by then: a sample may land on the
             period already back to 0 with the clock still at 0. */
          if (ksync_live.active && ((ksync_live.prev_period == 1 && ksync_live.prev_clock == 0)
-               || (map->phase && (ram[map->phase] == 2 || ram[map->phase] == 3))))
+               || (map->phase && (phase == 2 || phase == 3))))
          {
             ksync_live.extra = true;
             ksync_live.half  = clock;
@@ -2294,12 +2374,22 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          else
             ksync_live_start(ram, st, map, frame, clock);
       }
+      /* WE3: a match's formation (map->in_match going to 1) sets the clock -
+         which may not jump much: after a match left from the pause menu it
+         went on counting down in the menus. */
+      else if (map->kick_on_run && map->in_match && in_match && !ksync_live.prev_in_match
+            && period == 0 && clock >= KSYNC_LIVE_MIN_KICKOFF)
+      {
+         ksync_live.active = false;
+         ksync_live.armed  = clock;
+      }
       else if (ksync_live.armed && period == 0 && clock < ksync_live.prev_clock)
          ksync_live_start(ram, st, map, frame, ksync_live.armed);
       /* Joined mid-match (retry-connect): the clock is already running. Only
          right after the go-live - the team select screen has a counter
          going down too (a phantom match before "Start match"). */
-      else if (!ksync_live.active && ksync_live_joinable && clock > 0 && clock < ksync_live.prev_clock && in_play)
+      else if (!ksync_live.active && ksync_live_joinable && clock > 0 && clock < ksync_live.prev_clock
+            && in_play && in_match)
       {
          ksync_live_joinable = false;
          ksync_live_start(ram, st, map, 0, 18000);
@@ -2307,9 +2397,18 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       }
       else if (ksync_live.active && map->in_play)
       {
-         /* WE4: the ball stops after the 2nd half with the clock at 0 - the
-            end; with the clock still running - left from the pause menu. */
-         if (ksync_live.prev_in_play && !in_play && period == 1)
+         /* WE4: the ball stops at half time and at the end (the referee's
+            state, below) - without it, they left from the pause menu, in
+            any period (the state stays "in play"). The whistle may come a
+            moment after the ball stops: KSYNC_LIVE_LEFT_FRAMES to see it. */
+         if (map->state)
+         {
+            if (ksync_live.prev_in_play && !in_play && state != WE_STATE_OVER)
+               ksync_live.drop_frame = frame;
+         }
+         /* (Without the state: the ball stopping after the 2nd half with
+            the clock at 0 - the end; with the clock running - left.) */
+         else if (ksync_live.prev_in_play && !in_play && period == 1)
          {
             if (clock == 0)
                final = true;
@@ -2318,13 +2417,15 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          }
       }
       /* WE2002, WE3: after the 2nd half the period goes back to 0, clock at
-         0. WE3 resets the score with it - the end is the sample before. */
-      else if (ksync_live.active && ksync_live.prev_period == 1 && period == 0 && clock == 0)
+         0. WE3 resets the score with it - the end is the sample before (its
+         "continue": the period may come from extra time or the shootout). */
+      else if (ksync_live.active && period == 0 && clock == 0 && (ksync_live.prev_period == 1
+            || (map->end_resets && ksync_live.prev_period >= 1)))
       {
          /* WE2002: the period also goes back to 0 when a tied match goes to
             extra time (phase 2, already set) or to the penalty shootout
             (phase 4) - the end comes after them. */
-         if (map->phase && (ram[map->phase] == 2 || ram[map->phase] == 4))
+         if (map->phase && !map->end_resets && (phase == 2 || phase == 4))
          {
             /* extra time / shootout: not the end yet */
          }
@@ -2335,35 +2436,66 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          else
             ksync_live.active = false;
       }
+      if (ksync_live.drop_frame && (in_play || state == WE_STATE_OVER))
+         ksync_live.drop_frame = 0;
+      else if (ksync_live.drop_frame && frame - ksync_live.drop_frame >= KSYNC_LIVE_LEFT_FRAMES)
+      {
+         ksync_live.drop_frame = 0;
+         ksync_live.active     = false; /* left the match */
+      }
+      /* WE3's extra time: periods 2 and 3, a third of the half - the card's
+         "half" (its clock starting to run) follows it. */
+      if (ksync_live.active && period >= 2 && period <= 3
+            && clock >= ksync_live.prev_clock + KSYNC_LIVE_MIN_KICKOFF)
+         ksync_live.half = clock;
    }
-   /* WE2002: the referee ended the period (map->state). The 2nd half or extra
-      time with a winner, a golden goal (extra time's clock still running) or
-      the decided shootout - the end; tied, extra time or the shootout follow
-      (the phase goes up) or, KSYNC_LIVE_DRAW_FRAMES later, it's a draw. */
+   /* The referee ended the period (map->state). The 2nd half or extra time
+      with a winner, a golden goal (extra time's clock still running) or the
+      decided shootout - the end; tied, extra time or the shootout follow
+      (the phase goes up) or it's a draw: WE3 knows which from its settings,
+      WE2002 sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
+      WE3 also shows the state between the halves with the next period
+      already set (its clock at 0, or set for a few frames): a period's end
+      has its clock run to 0 in that period, a golden goal the clock run
+      (below the half's) with the setting on. */
+   if (ksync_live.active && clock > 0)
+      ksync_live.run_phase = phase + 1;
+   set     = map->settings ? ram[map->settings] : 0;
+   time_up = (phase == 1 || phase == 3)
+         && (!map->settings || (clock == 0 && ksync_live.run_phase == phase + 1));
+   golden  = (phase == 2 || phase == 3) && clock > 0 && (map->settings
+         ? (set & WE_SET_GOLDEN) && clock < ksync_live.half : phase == 2);
    if (ksync_live.active && map->state && map->phase && !final && !final_before
-         && ram[map->state] == WE_STATE_OVER)
+         && state == WE_STATE_OVER)
    {
-      unsigned phase = ram[map->phase];
       if (phase == 4)
       {
-         if (ram[map->pens] != ram[map->pens + 1])
+         if (ksync_live_b(ram, st, map->pens) != ksync_live_b(ram, st, map->pens + 1))
             final = true;
       }
-      else if (phase == 1 || phase == 3 || (phase == 2 && clock > 0))
+      else
       {
-         if (st[map->score] != st[map->score + 1])
-            final = true;
-         else if (!ksync_live.over_frame)
-            ksync_live.over_frame = frame;
-         else if (frame - ksync_live.over_frame >= KSYNC_LIVE_DRAW_FRAMES)
-            final = true;
+         if (time_up || golden)
+         {
+            if (st[map->score] != st[map->score + 1])
+               final = true;
+            else if (map->settings)
+            {
+               if (!((phase == 1 && (set & WE_SET_EXTRA)) || (set & WE_SET_PENS)))
+                  final = true; /* a draw: neither extra time nor the shootout */
+            }
+            else if (!ksync_live.over_frame)
+               ksync_live.over_frame = frame;
+            else if (frame - ksync_live.over_frame >= KSYNC_LIVE_DRAW_FRAMES)
+               final = true;
+         }
       }
    }
    else
       ksync_live.over_frame = 0;
-   /* WE2002 extra time: a goal after which the clock never runs again is a
-      golden goal (the game shows the result and goes back to the menus). */
-   if (ksync_live.active && map->phase && (ram[map->phase] == 2 || ram[map->phase] == 3))
+   /* Extra time: a goal after which the clock never runs again is a golden
+      goal (the game shows the result and goes back to the menus). */
+   if (ksync_live.active && map->phase && (phase == 2 || phase == 3))
    {
       unsigned goals = st[map->score] + st[map->score + 1];
       if (goals > ksync_live.et_goals)
@@ -2377,17 +2509,22 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       ksync_live.et_goals = st[map->score] + st[map->score + 1];
       ksync_live.gg_clock = 0;
    }
+   if (ksync_live.active && map->phase && phase == 4)
+      ksync_live.so_seen = true;
    /* The game left the match - back to the menus (other teams), "restart"
       (WE2002's phase goes back to 0 with the same teams, then the score) or
       any score going down: a decided shootout (its state byte doesn't
       always go to FF) or a golden goal ends like that - the end is the
       sample before, with the match's teams and score; otherwise the match
       was left, and a reset score is never sent. WE3 keeps the kickoff's
-      teams and resets the score at its end (end_resets). */
-   if (ksync_live.active && !map->end_resets && !final && !final_before && ksync_live.have_prev
-         && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]
-            || st[map->score] < ksync_live.prev_score[0] || st[map->score + 1] < ksync_live.prev_score[1]
-            || (ksync_live.decided && map->phase && ram[map->phase] < ksync_live.prev_phase)))
+      teams and resets the score at its end (end_resets) - it says when the
+      players left the match (map->in_match). */
+   if (ksync_live.active && !final && !final_before && ksync_live.have_prev
+         && ((!map->end_resets
+               && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]
+                  || st[map->score] < ksync_live.prev_score[0] || st[map->score + 1] < ksync_live.prev_score[1]
+                  || (ksync_live.decided && map->phase && phase < ksync_live.prev_phase)))
+            || (map->in_match && ksync_live.prev_in_match && !in_match)))
    {
       if (ksync_live.decided && ksync_live.last_json[0])
          final_before = true;
@@ -2395,36 +2532,36 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          ksync_live.active = false;
    }
    ksync_live.decided = map->phase
-         && ((ram[map->phase] == 4 && ram[map->pens] != ram[map->pens + 1])
-            || ((ram[map->phase] == 2 || ram[map->phase] == 3) && ksync_live.gg_clock > 1 /* clock running */
+         && ((phase == 4 && ksync_live_b(ram, st, map->pens) != ksync_live_b(ram, st, map->pens + 1))
+            || ((phase == 2 || phase == 3) && ksync_live.gg_clock > 1 /* clock running */
                && st[map->score] != st[map->score + 1])
-            || (map->state && ram[map->state] == WE_STATE_OVER
-               && (ram[map->phase] == 1 || ram[map->phase] == 3 || ram[map->phase] == 4
-                  || (ram[map->phase] == 2 && clock > 0))));
-   ksync_live.prev_phase    = map->phase ? ram[map->phase] : 0;
+            || (map->state && state == WE_STATE_OVER && (phase == 4 || time_up || golden)));
+   ksync_live.prev_phase    = phase;
    ksync_live.prev_score[0] = st[map->score];
    ksync_live.prev_score[1] = st[map->score + 1];
    /* WE2002 penalty shootout: over when its state byte (map->kicker: 9 while
       the kicks go on, 11/13 for ~6 s after a miss) goes to FF or, the score
       decided, stays at a miss's value for KSYNC_LIVE_SHOOTOUT_IDLE frames
       (the last kick missed - the game shows the result). */
-   if (ksync_live.active && !final_before && map->kicker && map->phase && ram[map->phase] == 4)
+   if (ksync_live.active && !final_before && map->kicker && map->phase && phase == 4)
    {
-      uint32_t so = (uint32_t)ram[map->pens] | ram[map->pens + 1] << 8 | (uint32_t)ram[map->kicker] << 16;
+      unsigned pens0 = ksync_live_b(ram, st, map->pens), pens1 = ksync_live_b(ram, st, map->pens + 1);
+      unsigned kick  = ksync_live_b(ram, st, map->kicker);
+      uint32_t so    = (uint32_t)pens0 | pens1 << 8 | (uint32_t)kick << 16;
       if (so != ksync_live.so_state || !ksync_live.so_since)
       {
          ksync_live.so_state = so;
          ksync_live.so_since = frame;
       }
-      if (ram[map->pens] != ram[map->pens + 1] && (ram[map->kicker] == 0xFF
-            || (ram[map->kicker] != 0 && ram[map->kicker] != 9
-               && frame - ksync_live.so_since >= KSYNC_LIVE_SHOOTOUT_IDLE)))
+      if (pens0 != pens1 && (kick == 0xFF
+            || (kick != 0 && kick != 9 && frame - ksync_live.so_since >= KSYNC_LIVE_SHOOTOUT_IDLE)))
          final = true;
    }
-   /* WE3: the 2nd half's clock and added time at 0 for 10 s - the end (the
-      game may still add a little after the first 0; the period only goes
-      back to 0 when the players leave the menu after the result). */
-   if (ksync_live.active && map->extra && !final && !final_before)
+   /* WE3 without its state byte: the 2nd half's clock and added time at 0
+      for 10 s - the end (the game may still add a little after the first
+      0; the period only goes back to 0 when the players leave the menu
+      after the result). */
+   if (ksync_live.active && map->extra && !map->state && !final && !final_before)
    {
       if (period == 1 && clock == 0 && ksync_live_u16(st, map->extra) == 0)
       {
@@ -2436,18 +2573,20 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       else
          ksync_live.over_since = 0;
    }
-   ksync_live.have_prev    = true;
-   ksync_live.prev_period  = period;
-   ksync_live.prev_clock   = clock;
-   ksync_live.prev_in_play = in_play;
+   ksync_live.have_prev     = true;
+   ksync_live.prev_period   = period;
+   ksync_live.prev_clock    = clock;
+   ksync_live.prev_in_play  = in_play;
+   ksync_live.prev_in_match = in_match;
    if (!ksync_live.active)
       return;
    /* The first seconds after the kickoff whistle: nothing goes yet - the
       players may still leave the match (wrong kits...) and start it again
-      without it counting (no card, no interrupted match). WE2002: from the
-      whistle itself (the state going to "ball in play" - ~14 s after the
-      clock is set, the teams walking in); others: from the clock set. */
-   if (map->state && !ksync_live.whistle && ram[map->state] == 1)
+      without it counting (no card, no interrupted match). From the whistle
+      itself (the state going to "ball in play" - WE2002 ~14 s after the
+      clock is set, the teams walking in; WE3 ~5 s); without the state: from
+      the clock set. */
+   if (map->state && !ksync_live.whistle && state == 1)
       ksync_live.whistle = frame;
    if (!final && !final_before && (map->state
          ? (!ksync_live.whistle || frame - ksync_live.whistle < KSYNC_LIVE_GRACE_FRAMES)
@@ -2537,7 +2676,9 @@ void kailleraSyncAfterFrame(unsigned frame)
    ksync_last_frame = frame;
    /* Placar ao vivo: only with the player logged into the WE Camp account
       (the DLL says so) - otherwise the game's RAM isn't read for it. */
-   ksync_live_goal_watch(ram, frame); /* only during a match the DLL allows (ksync_live.active) */
+   /* only during a match the DLL allows (ksync_live.active) */
+   ksync_live_goal_watch(ram, ksync_live.active && ksync_live.map && ksync_live.map->scratch
+         ? ksync_live_scratchpad() : NULL, frame);
    if (frame % KSYNC_LIVE_SAMPLE_FRAMES == 0)
    {
       if (kailleraLiveEnabledExternal())
