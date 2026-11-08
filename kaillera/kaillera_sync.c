@@ -1789,6 +1789,13 @@ typedef struct
    size_t   phase;
    size_t   pens;
    size_t   kicker;
+   /* WE2002: the last player to touch the ball - a field slot, 1-11 one
+      side and 12-22 the other (swapped each half), the roster index being
+      (slot - 1) % 11 - and the set piece being taken (2 = a penalty kick,
+      until the kick's goal or the play after it): an own goal's player and
+      the penalty goals (0 = engine without them). */
+   size_t   touch;
+   size_t   setpiece;
 } ksync_we_map;
 
 static const ksync_we_map ksync_we_maps[] = {
@@ -1797,13 +1804,13 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D038, { 0xB0, 0x70, 0x00, 0x0C, 0x20, 0x08, 0x06, 0x24, 0x0C, 0x00, 0x40, 0x14, 0x01, 0x00, 0x03, 0x24 } } },
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
-     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C },
+     0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
      false, 0x750FB, 0x750FD, 0x754A8, 0x754B9, 0x75293,
      { 0x75157, 0x751D7 }, 4, { 0x7490C, 0x749E8 }, 0, 22, 10, 0x75469,
-     0xA67C0, 0xA6AC0, true, true, false, false, 0, 0, 0, 0 },
+     0xA67C0, 0xA6AC0, true, true, false, false, 0, 0, 0, 0, 0, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1811,7 +1818,7 @@ static const ksync_we_map ksync_we_maps[] = {
        { 0x1D19C, { 0x1C, 0x00, 0xB3, 0xAF, 0x4C, 0x00, 0xB3, 0x93, 0x11, 0x80, 0x07, 0x3C, 0x78, 0xC1, 0xE7, 0x24 } } },
      true, 0x2DD, 0x2DF, 0x2C4, 0, 0x2D1,
      { 0x107FE5, 0x108045 }, 3, { 0xC8504, 0 }, 0xB0, 22, 8, 0,
-     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8, 0, 0, 0 },
+     0x1D1B48, 0x189B58, false, true, true, true, 0x2C8, 0, 0, 0, 0, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -1842,11 +1849,62 @@ static struct
    bool     have_names;
    char     names[WE_TEAMS][17];
    char     codes[WE_TEAMS][4];
+   /* map->touch: watched every frame (ksync_live_goal_watch()) - the goal
+      record doesn't say who scored an own goal nor that it was a penalty. */
+   bool     watching;
+   unsigned last_touch;     /* the last player to touch the ball (slot 1-22) */
+   unsigned pen_frame;      /* last frame a penalty kick was being taken (0 = none) */
+   unsigned goal_count[2];  /* goals already seen, per side */
+   uint8_t  goal_og[2][32]; /* own goal: the scorer's roster index + 1 (0 = unknown) */
+   bool     goal_pen[2][32];
 } ksync_live;
 
 static void ksync_live_reset(void)
 {
    memset(&ksync_live, 0, sizeof(ksync_live));
+}
+
+/* A goal right after a penalty kick (the set piece is still "penalty" until
+   the goal's frame) is a penalty goal. */
+#define KSYNC_LIVE_PEN_FRAMES 30
+
+/* Every frame of a match (map->touch only): who touched the ball last and
+   whether a penalty kick is being taken, so a goal that just showed up in
+   the records gets its own-goal scorer and its penalty mark - the sample
+   twice a second would be too late for either. */
+static void ksync_live_goal_watch(const uint8_t *ram, unsigned frame)
+{
+   const ksync_we_map *map = ksync_live.map;
+   unsigned side, i, n;
+
+   if (!ksync_live.active || !map || !map->touch)
+      return;
+   if (ram[map->touch] >= 1 && ram[map->touch] <= 22)
+      ksync_live.last_touch = ram[map->touch];
+   if (map->setpiece && ram[map->setpiece] == 2)
+      ksync_live.pen_frame = frame;
+   for (side = 0; side < 2; side++)
+   {
+      const uint8_t *goals = ram + map->goals[side];
+      for (n = 0; n < 32 && goals[map->goal_size * n + 2] != 0xFF; n++)
+         ;
+      /* Joined mid-match: the goals already there stay as they are. */
+      for (i = ksync_live.watching ? ksync_live.goal_count[side] : n; i < n; i++)
+      {
+         bool own = goals[map->goal_size * i] == 0xFF;
+         ksync_live.goal_og[side][i]  = own && ksync_live.last_touch
+               ? (uint8_t)((ksync_live.last_touch - 1) % 11 + 1) : 0;
+         ksync_live.goal_pen[side][i] = !own && ksync_live.pen_frame
+               && frame - ksync_live.pen_frame <= KSYNC_LIVE_PEN_FRAMES;
+      }
+      for (i = n; i < ksync_live.goal_count[side] && i < 32; i++)
+      {
+         ksync_live.goal_og[side][i]  = 0;
+         ksync_live.goal_pen[side][i] = false;
+      }
+      ksync_live.goal_count[side] = n;
+   }
+   ksync_live.watching = true;
 }
 
 /* The engine running - from the executable name the kernel keeps or, for
@@ -2005,12 +2063,18 @@ static bool ksync_live_valid(const uint8_t *ram, const uint8_t *st,
 }
 
 /* What changed since the last send: everything but the clock. */
-static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map)
+static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      unsigned clock)
 {
    uint32_t h = 2166136261u;
    size_t i;
 #define KSYNC_LIVE_MIX(m, a, n) for (i = 0; i < (n); i++) h = (h ^ (m)[(a) + i]) * 16777619u
    KSYNC_LIVE_MIX(st, map->period, 1);
+   /* The half's clock starting to run (the card leaves "Intervalo" then). */
+   h = (h ^ (unsigned)(ksync_live.half && clock >= ksync_live.half)) * 16777619u;
+   /* An own goal's scorer / a penalty mark (ksync_live_goal_watch()). */
+   KSYNC_LIVE_MIX(ksync_live.goal_og[0], 0, 32);
+   KSYNC_LIVE_MIX(ksync_live.goal_og[1], 0, 32);
    if (map->pads)
       KSYNC_LIVE_MIX(ram, map->pads, 4);
    h = (h ^ ksync_live_team(st, map, 0)) * 16777619u;
@@ -2066,16 +2130,30 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
       for (i = 0; i < 32 && goals[gs * i + 2] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
          char scorer[20], assist[20];
-         /* Own goal: in the list of the team it counted for, without the player. */
-         if (goals[gs * i] == 0xFF)
+         const char *kind = "";
+         /* Own goal: in the list of the team it counted for, without the
+            player - who touched the ball last, from the other side's roster
+            (ksync_live_goal_watch()), when it was seen. */
+         if (goals[gs * i] == 0xFF && ksync_live.goal_og[side][i] && !map->roster_team)
+         {
+            ksync_live_name(ram, map->roster[!side] + map->name_len * (ksync_live.goal_og[side][i] - 1),
+                  map->name_len, scorer, sizeof(scorer));
+            kind = "og";
+         }
+         else if (goals[gs * i] == 0xFF)
             strlcpy(scorer, "Gol contra", sizeof(scorer));
          else
+         {
             ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
+            if (ksync_live.goal_pen[side][i])
+               kind = "pen";
+         }
          assist[0] = '\0';
          if (goals[gs * i + 1] < map->roster_len)
             ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
-         n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"]", i ? "," : "",
-               scorer, goals[gs * i + 2], assist);
+         /* v2's 4th item: "og" (own goal, the player its scorer) or "pen". */
+         n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"%s%s%s]", i ? "," : "",
+               scorer, goals[gs * i + 2], assist, *kind ? ",\"" : "", kind, *kind ? "\"" : "");
       }
       if (n > 0 && (size_t)n < cap)
          n += snprintf(out + n, cap - n, "]}");
@@ -2223,7 +2301,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    if (map->end_resets && !ksync_live_json(ram, st, map, frame, period, clock, false,
             ksync_live.last_json, sizeof(ksync_live.last_json)))
       ksync_live.last_json[0] = '\0';
-   sig = ksync_live_sig(ram, st, map);
+   sig = ksync_live_sig(ram, st, map, clock);
    if (!final && sig == ksync_live.sent_sig
          && frame - ksync_live.sent_frame < KSYNC_LIVE_HEARTBEAT_FRAMES)
       return;
@@ -2288,6 +2366,7 @@ void kailleraSyncAfterFrame(unsigned frame)
    ksync_last_frame = frame;
    /* Placar ao vivo: only with the player logged into the WE Camp account
       (the DLL says so) - otherwise the game's RAM isn't read for it. */
+   ksync_live_goal_watch(ram, frame); /* only during a match the DLL allows (ksync_live.active) */
    if (frame % KSYNC_LIVE_SAMPLE_FRAMES == 0)
    {
       if (kailleraLiveEnabledExternal())
