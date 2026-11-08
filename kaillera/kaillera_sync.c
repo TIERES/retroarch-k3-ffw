@@ -232,6 +232,10 @@ static uint64_t            ksync_ram_acc;
 static unsigned            ksync_ram_window;
 static unsigned            ksync_frame_base; /* frame 0 of the detector's numbering */
 static bool                ksync_renumber_pending; /* restart numbering next frame */
+/* Placar ao vivo: a match may be joined with its clock already running only
+   right after a retry-connect go-live / rollback resume (the renumbering) -
+   never otherwise (the team select screen looks like a running match). */
+static bool                ksync_live_joinable;
 static unsigned            ksync_last_frame;       /* last frame run, detector numbering */
 static ksync_digest_t      ksync_local_digests[KSYNC_DIGEST_HISTORY];
 
@@ -944,6 +948,7 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
    ksync_ram_window        = (unsigned)-1;
    ksync_frame_base        = 0;
    ksync_renumber_pending  = false;
+   ksync_live_joinable     = false;
    ksync_last_frame        = 0;
    ksync_epoch             = 0;
 
@@ -1873,6 +1878,7 @@ static struct
    unsigned prev_phase;
    unsigned prev_score[2];
    unsigned over_frame;     /* map->state: the frame a tied 2nd half / extra time ended (0 = not) */
+   unsigned whistle;        /* map->state: the kickoff whistle's frame (the ball in play) - 0 = not yet */
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -2238,6 +2244,7 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
    ksync_live.gg_clock      = 0;
    ksync_live.decided       = false;
    ksync_live.so_since      = 0;
+   ksync_live.whistle       = 0;
 }
 
 static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *scratch,
@@ -2289,9 +2296,15 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       }
       else if (ksync_live.armed && period == 0 && clock < ksync_live.prev_clock)
          ksync_live_start(ram, st, map, frame, ksync_live.armed);
-      /* Joined mid-match (retry-connect): the clock is already running. */
-      else if (!ksync_live.active && clock > 0 && clock < ksync_live.prev_clock && in_play)
+      /* Joined mid-match (retry-connect): the clock is already running. Only
+         right after the go-live - the team select screen has a counter
+         going down too (a phantom match before "Start match"). */
+      else if (!ksync_live.active && ksync_live_joinable && clock > 0 && clock < ksync_live.prev_clock && in_play)
+      {
+         ksync_live_joinable = false;
          ksync_live_start(ram, st, map, 0, 18000);
+         ksync_live.whistle = frame; /* the ball already rolls */
+      }
       else if (ksync_live.active && map->in_play)
       {
          /* WE4: the ball stops after the 2nd half with the clock at 0 - the
@@ -2429,10 +2442,16 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.prev_in_play = in_play;
    if (!ksync_live.active)
       return;
-   /* The first seconds after the kickoff: nothing goes yet - the players may
-      still leave the match (wrong kits...) and start it again without it
-      counting (no card, no interrupted match). */
-   if (ksync_live.kickoff && frame - ksync_live.kickoff < KSYNC_LIVE_GRACE_FRAMES && !final && !final_before)
+   /* The first seconds after the kickoff whistle: nothing goes yet - the
+      players may still leave the match (wrong kits...) and start it again
+      without it counting (no card, no interrupted match). WE2002: from the
+      whistle itself (the state going to "ball in play" - ~14 s after the
+      clock is set, the teams walking in); others: from the clock set. */
+   if (map->state && !ksync_live.whistle && ram[map->state] == 1)
+      ksync_live.whistle = frame;
+   if (!final && !final_before && (map->state
+         ? (!ksync_live.whistle || frame - ksync_live.whistle < KSYNC_LIVE_GRACE_FRAMES)
+         : (ksync_live.kickoff && frame - ksync_live.kickoff < KSYNC_LIVE_GRACE_FRAMES)))
       return;
 
    if (final_before)
@@ -2491,6 +2510,7 @@ void kailleraSyncAfterFrame(unsigned frame)
       ksync_renumber_pending = false;
       ksync_frame_base       = frame - 1;
       ksync_ram_window       = (unsigned)-1;
+      ksync_live_joinable    = true;
       KSYNC_LOCK();
       memset(ksync_local_digests, 0, sizeof(ksync_local_digests));
       if (!ksync_digest_enabled)
