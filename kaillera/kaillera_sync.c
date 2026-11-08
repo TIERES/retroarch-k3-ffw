@@ -1859,6 +1859,12 @@ static struct
    bool     goal_pen[2][32];
    uint32_t so_state;       /* WE2002 shootout: pens + state byte, and since when */
    unsigned so_since;
+   unsigned et_goals;       /* WE2002 extra time: goals seen (both teams) ... */
+   unsigned gg_clock;       /* ... and the clock + 1 when the last one came in, while it hasn't
+                               moved since (a golden goal ends the match there) - 0 = none */
+   bool     decided;        /* the last sample: a decided shootout or a golden goal */
+   unsigned prev_phase;
+   unsigned prev_score[2];
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -2186,6 +2192,13 @@ static void ksync_live_start(const uint8_t *st, const ksync_we_map *map,
    ksync_live.team[0]      = st[map->team_id];
    ksync_live.team[1]      = st[map->team_id + 1];
    ksync_live.last_json[0] = '\0';
+   /* This match's score from here (a new kickoff isn't a score going down). */
+   ksync_live.prev_score[0] = st[map->score];
+   ksync_live.prev_score[1] = st[map->score + 1];
+   ksync_live.et_goals      = st[map->score] + st[map->score + 1];
+   ksync_live.gg_clock      = 0;
+   ksync_live.decided       = false;
+   ksync_live.so_since      = 0;
 }
 
 static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *scratch,
@@ -2271,19 +2284,46 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             ksync_live.active = false;
       }
    }
-   /* The game left the match (back to the menus: other teams) - WE2002's
-      shootout ends like that when its state byte doesn't go to FF: the end
-      is the sample before, with the match's teams; otherwise the match was
-      left. WE3 keeps the kickoff's teams (end_resets). */
-   if (ksync_live.active && !map->end_resets && !final && !final_before
-         && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]))
+   /* WE2002 extra time: a goal after which the clock never runs again is a
+      golden goal (the game shows the result and goes back to the menus). */
+   if (ksync_live.active && map->phase && (ram[map->phase] == 2 || ram[map->phase] == 3))
    {
-      if (map->phase && ram[map->phase] == 4 && ram[map->pens] != ram[map->pens + 1]
-            && ksync_live.last_json[0])
+      unsigned goals = st[map->score] + st[map->score + 1];
+      if (goals > ksync_live.et_goals)
+         ksync_live.gg_clock = clock + 1;
+      else if (ksync_live.gg_clock && clock + 1 != ksync_live.gg_clock)
+         ksync_live.gg_clock = 0; /* the match went on */
+      ksync_live.et_goals = goals;
+   }
+   else if (ksync_live.active)
+   {
+      ksync_live.et_goals = st[map->score] + st[map->score + 1];
+      ksync_live.gg_clock = 0;
+   }
+   /* The game left the match - back to the menus (other teams), "restart"
+      (WE2002's phase goes back to 0 with the same teams, then the score) or
+      any score going down: a decided shootout (its state byte doesn't
+      always go to FF) or a golden goal ends like that - the end is the
+      sample before, with the match's teams and score; otherwise the match
+      was left, and a reset score is never sent. WE3 keeps the kickoff's
+      teams and resets the score at its end (end_resets). */
+   if (ksync_live.active && !map->end_resets && !final && !final_before && ksync_live.have_prev
+         && (st[map->team_id] != ksync_live.team[0] || st[map->team_id + 1] != ksync_live.team[1]
+            || st[map->score] < ksync_live.prev_score[0] || st[map->score + 1] < ksync_live.prev_score[1]
+            || (ksync_live.decided && map->phase && ram[map->phase] != ksync_live.prev_phase)))
+   {
+      if (ksync_live.decided && ksync_live.last_json[0])
          final_before = true;
       else
          ksync_live.active = false;
    }
+   ksync_live.decided = map->phase
+         && ((ram[map->phase] == 4 && ram[map->pens] != ram[map->pens + 1])
+            || ((ram[map->phase] == 2 || ram[map->phase] == 3) && ksync_live.gg_clock > 1 /* clock running */
+               && st[map->score] != st[map->score + 1]));
+   ksync_live.prev_phase    = map->phase ? ram[map->phase] : 0;
+   ksync_live.prev_score[0] = st[map->score];
+   ksync_live.prev_score[1] = st[map->score + 1];
    /* WE2002 penalty shootout: over when its state byte (map->kicker: 9 while
       the kicks go on, 11/13 for ~6 s after a miss) goes to FF or, the score
       decided, stays at a miss's value for KSYNC_LIVE_SHOOTOUT_IDLE frames
@@ -2334,9 +2374,9 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       }
       return;
    }
-   /* The sample before the end: WE3's, and WE2002's shootout (left from its
-      result screen - other teams). */
-   if ((map->end_resets || (map->phase && ram[map->phase] == 4))
+   /* The sample before the end: WE3's, and WE2002's extra time and shootout
+      (a golden goal / the shootout left from the result screen - other teams). */
+   if ((map->end_resets || (map->phase && ram[map->phase] >= 2 && ram[map->phase] <= 4))
          && !ksync_live_json(ram, st, map, frame, period, clock, false,
             ksync_live.last_json, sizeof(ksync_live.last_json)))
       ksync_live.last_json[0] = '\0';
