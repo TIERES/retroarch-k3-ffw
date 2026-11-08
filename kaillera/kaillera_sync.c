@@ -2131,27 +2131,30 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
       {
          char scorer[20], assist[20];
          const char *kind = "";
+         assist[0] = '\0';
          /* Own goal: in the list of the team it counted for, without the
             player - who touched the ball last, from the other side's roster
-            (ksync_live_goal_watch()), when it was seen. */
-         if (goals[gs * i] == 0xFF && ksync_live.goal_og[side][i] && !map->roster_team)
+            (ksync_live_goal_watch()), when it was seen, goes in the assist's
+            place (an older WE Camp shows it as the assist). */
+         if (goals[gs * i] == 0xFF)
          {
-            ksync_live_name(ram, map->roster[!side] + map->name_len * (ksync_live.goal_og[side][i] - 1),
-                  map->name_len, scorer, sizeof(scorer));
-            kind = "og";
-         }
-         else if (goals[gs * i] == 0xFF)
             strlcpy(scorer, "Gol contra", sizeof(scorer));
+            if (ksync_live.goal_og[side][i] && !map->roster_team)
+            {
+               ksync_live_name(ram, map->roster[!side] + map->name_len * (ksync_live.goal_og[side][i] - 1),
+                     map->name_len, assist, sizeof(assist));
+               kind = "og";
+            }
+         }
          else
          {
             ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
             if (ksync_live.goal_pen[side][i])
                kind = "pen";
+            if (goals[gs * i + 1] < map->roster_len)
+               ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
          }
-         assist[0] = '\0';
-         if (goals[gs * i + 1] < map->roster_len)
-            ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
-         /* v2's 4th item: "og" (own goal, the player its scorer) or "pen". */
+         /* v2's 4th item: "og" (own goal, its player in the assist's place) or "pen". */
          n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"%s%s%s]", i ? "," : "",
                scorer, goals[gs * i + 2], assist, *kind ? ",\"" : "", kind, *kind ? "\"" : "");
       }
