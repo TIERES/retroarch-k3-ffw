@@ -57,6 +57,12 @@ int kailleraMemcardPrepareExternal(const char* contentId, const char* gameFile, 
 /* After a successful prepare: the slots left without a memory card (bit 0 =
    slot 1, bit 1 = slot 2) - 0 when the loaded DLL doesn't say. */
 int kailleraMemcardEmptySlotsExternal(void);
+/* Placar ao vivo: whether to read the match from the game's RAM (the DLL
+   says so only with the player logged into the WE Camp account; 0 for DLLs
+   without kailleraLiveEnabled()) and the state read (JSON) for WE Camp. See
+   kaillera.c. */
+int kailleraLiveEnabledExternal(void);
+void kailleraLiveMatchExternal(const char* stateJson);
 void cp1251_to_utf8(char* out, const char* in);
 extern bool kailleraNetplay;
 extern bool kailleraInitialised;

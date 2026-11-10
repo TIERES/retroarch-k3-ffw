@@ -405,6 +405,31 @@ int kailleraMemcardEmptySlotsExternal(void)
    return 0;
 }
 
+/* Placar ao vivo - optional, same GetProcAddress-if-present convention:
+   kailleraLiveEnabled() says whether to read the match from the game's RAM
+   at all (a match being played with the player logged into the WE Camp
+   account) and kailleraLiveMatch(json) sends what was read (kaillera_sync.c,
+   ksync_live_sample()) to WE Camp. Older DLLs: nothing is read or sent. */
+void (WINAPI* kailleraLiveMatchF)(const char* stateJson);
+int (WINAPI* kailleraLiveEnabledF)(void);
+
+int kailleraLiveEnabledExternal(void)
+{
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   return kailleraLiveEnabledF != NULL && kailleraLiveMatchF != NULL && kailleraLiveEnabledF();
+#else
+   return 0;
+#endif
+}
+
+void kailleraLiveMatchExternal(const char* stateJson)
+{
+#if !defined(N02_WIN32) && !defined(N02_LINUX)
+   if (kailleraLiveMatchF != NULL)
+      kailleraLiveMatchF(stateJson);
+#endif
+}
+
 /* retry-connect - optional, same GetProcAddress-if-present convention as
    kailleraIsPlaybackModeF above. See kaillera.h. */
 int (WINAPI* kailleraRetryConnectCanControlF)();
@@ -466,6 +491,8 @@ void CloseKaillera() {
    kailleraMemcardPrepareF                 = NULL;
    kailleraMemcardFinishF                  = NULL;
    kailleraMemcardEmptySlotsF              = NULL;
+   kailleraLiveMatchF                      = NULL;
+   kailleraLiveEnabledF                    = NULL;
    kailleraRetryConnectCanControlF         = NULL;
    kailleraRetryConnectNotifyLocalControlF = NULL;
    kailleraRetryConnectPollF               = NULL;
@@ -758,6 +785,8 @@ void LoadKaillera() {
       kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "kailleraMemcardPrepare");
       kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraMemcardFinish");
       kailleraMemcardEmptySlotsF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraMemcardEmptySlots");
+      kailleraLiveMatchF = (void (WINAPI*)(const char*)) GetProcAddress(kailleraDLL, "kailleraLiveMatch");
+      kailleraLiveEnabledF = (int (WINAPI*)(void)) GetProcAddress(kailleraDLL, "kailleraLiveEnabled");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraRetryConnectCanControl");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "kailleraRetryConnectNotifyLocalControl");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "kailleraRetryConnectPoll");
@@ -794,6 +823,8 @@ void LoadKaillera() {
       kailleraMemcardPrepareF = (int (WINAPI*)(const char*, const char*, const char*)) GetProcAddress(kailleraDLL, "_kailleraMemcardPrepare@12");
       kailleraMemcardFinishF = (void (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraMemcardFinish@0");
       kailleraMemcardEmptySlotsF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraMemcardEmptySlots@0");
+      kailleraLiveMatchF = (void (WINAPI*)(const char*)) GetProcAddress(kailleraDLL, "_kailleraLiveMatch@4");
+      kailleraLiveEnabledF = (int (WINAPI*)(void)) GetProcAddress(kailleraDLL, "_kailleraLiveEnabled@0");
       kailleraRetryConnectCanControlF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraRetryConnectCanControl@0");
       kailleraRetryConnectNotifyLocalControlF = (void (WINAPI*)(int, int)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectNotifyLocalControl@8");
       kailleraRetryConnectPollF = (int (WINAPI*)(int*, int*)) GetProcAddress(kailleraDLL, "_kailleraRetryConnectPoll@8");
