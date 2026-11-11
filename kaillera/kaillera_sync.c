@@ -1835,6 +1835,11 @@ typedef struct
    size_t   stats;
    size_t   cards[2];
    size_t   injuries;
+   /* WE3: each team's shirt numbers, numbers + team x numbers_team +
+      roster index - a player whose name can't be read (Japanese, in
+      Shift-JIS) goes as "#" and the number (0 = engine without them). */
+   size_t   numbers;
+   size_t   numbers_team;
 } ksync_we_map;
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
@@ -1849,7 +1854,7 @@ static const ksync_we_map ksync_we_maps[] = {
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
      2, 0xFF, 0, 0, 0, 0,
-     0x756F2, { 0x75568, 0x7557F }, 0x73968 },
+     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -1863,7 +1868,7 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, 0, 0, 0, 0x72FD2,
      /* The RESULT numbers and each player's cards, as WE2002's (the injury
         list not found yet). */
-     0x75283, { 0x750FF, 0x75115 }, 0 },
+     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1880,7 +1885,9 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, WE_SCR | 0x198, 0x10A2C2, 1, 0x10A307,
      /* The RESULT numbers and each player's cards, as WE2002's - in the RAM,
         right before the goal records (the injury list not found yet). */
-     0x1085B0, { 0x107F8D, 0x107FA3 }, 0 },
+     0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
+     /* The shirt numbers, 22 per team. */
+     0x1346DC, 22 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2105,6 +2112,24 @@ static void ksync_live_name(const uint8_t *ram, size_t addr, size_t cap,
    out[n] = '\0';
 }
 
+/* A player of a side for WE Camp: the roster name or, when it can't be read
+   (WE3's Japanese, in Shift-JIS), "#" and the shirt number - WE Camp shows
+   "Número N" (nothing when the engine's numbers aren't known). */
+static void ksync_live_player(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      unsigned side, unsigned idx, char *out, size_t cap)
+{
+   unsigned team = ksync_live_team(st, map, side);
+   size_t roster = map->roster_team ? map->roster[0] + map->roster_team * team : map->roster[side];
+
+   ksync_live_name(ram, roster + map->name_len * idx, map->name_len, out, cap);
+   if (!out[0] && map->numbers && map->numbers_team && idx < map->roster_len && team < WE_TEAMS)
+   {
+      unsigned number = ram[map->numbers + map->numbers_team * team + idx];
+      if (number >= 1 && number <= 99)
+         snprintf(out, cap, "#%u", number);
+   }
+}
+
 /* A team name as the select screen keeps it: 1 to cap-1 printable
    characters, no lowercase where the engine has none (anything else is
    some other screen's data). */
@@ -2242,15 +2267,15 @@ static unsigned ksync_live_minute(unsigned phase, unsigned clock)
    return base + (run ? (unsigned)(((uint64_t)span * run - 1) / half) : 0);
 }
 
-static void ksync_live_add(ksync_live_event *list, unsigned *count, const uint8_t *ram,
-      size_t name, unsigned name_len, unsigned minute, const char *kind)
+static void ksync_live_add(ksync_live_event *list, unsigned *count, const uint8_t *ram, const uint8_t *st,
+      const ksync_we_map *map, unsigned side, unsigned idx, unsigned minute, const char *kind)
 {
    ksync_live_event *e;
 
    if (*count >= KSYNC_LIVE_EVENTS)
       return;
    e = &list[(*count)++];
-   ksync_live_name(ram, name, name_len, e->name, sizeof(e->name));
+   ksync_live_player(ram, st, map, side, idx, e->name, sizeof(e->name));
    e->minute = minute;
    e->kind   = kind;
 }
@@ -2263,12 +2288,7 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
 {
    static const char *const card_kinds[3] = { "y", "y2", "r" };
    unsigned side, i, k, minute = ksync_live_minute(phase, clock);
-   /* The side's roster: WE3 keeps one per team. */
-   size_t roster[2];
 
-   for (side = 0; side < 2; side++)
-      roster[side] = map->roster_team ? map->roster[0] + map->roster_team * ksync_live_team(st, map, side)
-                   : map->roster[side];
    for (side = 0; side < 2 && map->cards[0]; side++)
       for (i = 0; i < map->roster_len && i < 32; i++)
       {
@@ -2281,8 +2301,8 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
          ksync_live.card_bits[side][i] |= add;
          for (k = 0; k < 3 && !quiet; k++)
             if (add & (1u << k))
-               ksync_live_add(ksync_live.cards[side], &ksync_live.card_count[side], ram,
-                     roster[side] + map->name_len * i, map->name_len, minute, card_kinds[k]);
+               ksync_live_add(ksync_live.cards[side], &ksync_live.card_count[side], ram, st, map,
+                     side, i, minute, card_kinds[k]);
       }
    /* The injured players: the list only grows during the match (each
       record stays until the end; the game clears it at the match's load
@@ -2301,8 +2321,8 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
                || (rec[1] != team0 && rec[1] != ksync_live_team(st, map, 1)))
             continue;
          side = rec[1] == team0 ? 0 : 1; /* the same team on both sides: LOCAL */
-         ksync_live_add(ksync_live.injuries[side], &ksync_live.injury_count[side], ram,
-               roster[side] + map->name_len * rec[0], map->name_len, minute, "y");
+         ksync_live_add(ksync_live.injuries[side], &ksync_live.injury_count[side], ram, st, map,
+               side, rec[0], minute, "y");
       }
       ksync_live.injury_seen = i;
    }
@@ -2359,8 +2379,6 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    {
       const uint8_t *goals = ram + map->goals[side];
       unsigned team        = ksync_live_team(st, map, side);
-      size_t roster        = map->roster_team ? map->roster[0] + map->roster_team * team
-                           : map->roster[side];
       bool known           = ksync_live.have_names && team < WE_TEAMS;
 
       n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\","
@@ -2381,22 +2399,17 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
             strlcpy(scorer, "Gol contra", sizeof(scorer));
             if (ksync_live.goal_og[side][i])
             {
-               /* WE3 keeps a roster per team, not per side. */
-               size_t other = map->roster_team
-                            ? map->roster[0] + map->roster_team * ksync_live_team(st, map, !side)
-                            : map->roster[!side];
-               ksync_live_name(ram, other + map->name_len * (ksync_live.goal_og[side][i] - 1),
-                     map->name_len, assist, sizeof(assist));
+               ksync_live_player(ram, st, map, !side, ksync_live.goal_og[side][i] - 1, assist, sizeof(assist));
                kind = "og";
             }
          }
          else
          {
-            ksync_live_name(ram, roster + map->name_len * goals[gs * i], map->name_len, scorer, sizeof(scorer));
+            ksync_live_player(ram, st, map, side, goals[gs * i], scorer, sizeof(scorer));
             if (ksync_live.goal_pen[side][i])
                kind = "pen";
             if (goals[gs * i + 1] < map->roster_len)
-               ksync_live_name(ram, roster + map->name_len * goals[gs * i + 1], map->name_len, assist, sizeof(assist));
+               ksync_live_player(ram, st, map, side, goals[gs * i + 1], assist, sizeof(assist));
          }
          /* v2's 4th item: "og" (own goal, its player in the assist's place) or "pen". */
          n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"%s%s%s]", i ? "," : "",
