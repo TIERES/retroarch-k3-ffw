@@ -2454,17 +2454,18 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       decided shootout - the end; tied, extra time or the shootout follow
       (the phase goes up) or it's a draw: WE3 knows which from its settings,
       WE2002 sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
-      WE3 also shows the state between the halves with the next period
-      already set (its clock at 0, or set for a few frames): a period's end
-      has its clock run to 0 in that period, a golden goal the clock run
-      (below the half's) with the setting on. */
+      Every engine also shows the state between the halves with the next
+      period already set (its clock at 0, or set for a few frames - WE2002
+      for 1-2 frames, a sample landing there was a false end at half time):
+      a period's end has its clock run to 0 in that period, a golden goal
+      the clock run (below the half's) with the setting on - WE2002, with
+      no settings in RAM: in either half of extra time. */
    if (ksync_live.active && clock > 0)
       ksync_live.run_phase = phase + 1;
    set     = map->settings ? ram[map->settings] : 0;
-   time_up = (phase == 1 || phase == 3)
-         && (!map->settings || (clock == 0 && ksync_live.run_phase == phase + 1));
-   golden  = (phase == 2 || phase == 3) && clock > 0 && (map->settings
-         ? (set & WE_SET_GOLDEN) && clock < ksync_live.half : phase == 2);
+   time_up = (phase == 1 || phase == 3) && clock == 0 && ksync_live.run_phase == phase + 1;
+   golden  = (phase == 2 || phase == 3) && clock > 0 && clock < ksync_live.half
+         && (!map->settings || (set & WE_SET_GOLDEN));
    if (ksync_live.active && map->state && map->phase && !final && !final_before
          && state == WE_STATE_OVER)
    {
