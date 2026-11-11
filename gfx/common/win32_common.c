@@ -889,7 +889,23 @@ static void win32_save_position(void)
       g_win32->pos_y      = placement.rcNormalPosition.top;
    }
 
-   if (GetWindowRect(main_window.hwnd, &rect))
+   /* TIERES: while minimized, GetWindowRect() is the taskbar icon's
+    * rectangle. Closing RetroArch minimized saved it as the window size
+    * (181 x -38 at 125% DPI), and every start after that opened a window
+    * with no client area. Minimized, the size is the restored window's,
+    * like the position above; normal and maximized windows are unchanged. */
+   if (IsIconic(main_window.hwnd))
+   {
+      if (     placement.rcNormalPosition.right  > placement.rcNormalPosition.left
+            && placement.rcNormalPosition.bottom > placement.rcNormalPosition.top)
+      {
+         g_win32->pos_width  = placement.rcNormalPosition.right
+            - placement.rcNormalPosition.left;
+         g_win32->pos_height = placement.rcNormalPosition.bottom
+            - placement.rcNormalPosition.top;
+      }
+   }
+   else if (GetWindowRect(main_window.hwnd, &rect))
    {
       g_win32->pos_width  = rect.right  - rect.left;
       g_win32->pos_height = rect.bottom - rect.top;
@@ -926,6 +942,55 @@ static void win32_save_position(void)
          }
       }
    }
+}
+
+/* TIERES: whether a window geometry saved in the config is worth using.
+ * A size saved while minimized (the taskbar icon: 181 x -38 at 125% DPI,
+ * the negative height read back as a huge unsigned one) or squeezed to
+ * nothing, and a position no monitor shows any more (a TV or monitor that
+ * was unplugged), open a window nobody can see or use. Those open at the
+ * default size and place instead, and the next close saves good values.
+ * width/height are the client area, as win32_save_position() saves it. */
+#define WIN32_SAVED_WINDOW_MIN_WIDTH     320
+#define WIN32_SAVED_WINDOW_MIN_HEIGHT    240
+#define WIN32_SAVED_WINDOW_MAX_SIZE      16384
+#define WIN32_SAVED_WINDOW_MIN_VISIBLE   64
+
+/* The size part, which video_driver.c also checks before asking for a
+ * window that size. As int: a negative size saved before reads back as a
+ * huge unsigned one. */
+bool win32_saved_window_size_usable(unsigned width, unsigned height)
+{
+   return    (int)width  >= WIN32_SAVED_WINDOW_MIN_WIDTH
+          && (int)height >= WIN32_SAVED_WINDOW_MIN_HEIGHT
+          && (int)width  <= WIN32_SAVED_WINDOW_MAX_SIZE
+          && (int)height <= WIN32_SAVED_WINDOW_MAX_SIZE;
+}
+
+static bool win32_saved_window_usable(int x, int y,
+      int width, int height, int title_bar_height)
+{
+   RECT title_bar, visible;
+   MONITORINFO info;
+   HMONITOR monitor;
+
+   if (!win32_saved_window_size_usable((unsigned)width, (unsigned)height))
+      return false;
+
+   /* Enough of the title bar on some monitor to see it and drag it. */
+   title_bar.left   = x;
+   title_bar.top    = y;
+   title_bar.right  = x + width;
+   title_bar.bottom = y + (title_bar_height > 0 ? title_bar_height : 1);
+   monitor          = MonitorFromRect(&title_bar, MONITOR_DEFAULTTONULL);
+   if (!monitor)
+      return false;
+   info.cbSize      = sizeof(info);
+   if (!GetMonitorInfo(monitor, &info))
+      return true;
+   if (!IntersectRect(&visible, &title_bar, &info.rcWork))
+      return false;
+   return (visible.right - visible.left) >= WIN32_SAVED_WINDOW_MIN_VISIBLE;
 }
 
 /* Get minimum window size for running core. */
@@ -2413,15 +2478,25 @@ void win32_set_style(MONITORINFOEX *current_mon, HMONITOR *hm_to_use,
          unsigned window_position_width   = settings->uints.window_position_width;
          unsigned window_position_height  = settings->uints.window_position_height;
 
-         g_win32->pos_x                   = window_position_x;
-         g_win32->pos_y                   = window_position_y;
-         g_win32->pos_width               = window_position_width
-            + border_thickness * 2;
-         g_win32->pos_height              = window_position_height
-            + border_thickness * 2 + title_bar_height;
+         /* TIERES: only a geometry the player can see and use. */
+         if (win32_saved_window_usable((int)window_position_x,
+                  (int)window_position_y, (int)window_position_width,
+                  (int)window_position_height, title_bar_height))
+         {
+            g_win32->pos_x                = window_position_x;
+            g_win32->pos_y                = window_position_y;
+            g_win32->pos_width            = window_position_width
+               + border_thickness * 2;
+            g_win32->pos_height           = window_position_height
+               + border_thickness * 2 + title_bar_height;
 
-         if (g_win32->pos_width != 0 && g_win32->pos_height != 0)
-            position_set_from_config = true;
+            if (g_win32->pos_width != 0 && g_win32->pos_height != 0)
+               position_set_from_config = true;
+         }
+         else
+            RARCH_LOG("[Win32]: Ignoring saved window geometry %d,%d %dx%d.\n",
+                  (int)window_position_x, (int)window_position_y,
+                  (int)window_position_width, (int)window_position_height);
       }
 
       if (position_set_from_config)
@@ -2433,6 +2508,16 @@ void win32_set_style(MONITORINFOEX *current_mon, HMONITOR *hm_to_use,
       {
          g_win32_resize_width  = *width   = rect->right  - rect->left;
          g_win32_resize_height = *height  = rect->bottom - rect->top;
+         /* TIERES: win32_window_create() takes the size from g_win32
+          * whenever positions are saved: the default size, then, and the
+          * default place. */
+         if (video_window_save_positions)
+         {
+            g_win32->pos_x      = CW_USEDEFAULT;
+            g_win32->pos_y      = CW_USEDEFAULT;
+            g_win32->pos_width  = *width;
+            g_win32->pos_height = *height;
+         }
       }
    }
 }

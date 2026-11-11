@@ -97,6 +97,10 @@ bool win32_window_init(WNDCLASSEX *wndclass, bool fullscreen, const char *class_
 void win32_set_style(MONITORINFOEX *current_mon, HMONITOR *hm_to_use,
       unsigned *width, unsigned *height, bool fullscreen, bool windowed_full,
       RECT *rect, RECT *mon_rect, DWORD *style);
+
+/* TIERES: whether a window size saved in the config can be used - not the
+ * taskbar icon of a window closed while minimized (see win32_common.c). */
+bool win32_saved_window_size_usable(unsigned width, unsigned height);
 #endif
 void win32_monitor_from_window(void);
 #endif

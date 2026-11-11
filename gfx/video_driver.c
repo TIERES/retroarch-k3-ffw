@@ -3058,7 +3058,15 @@ bool video_driver_init_internal(bool *video_is_threaded, bool verbosity_enabled)
          /* TODO/FIXME: remove when the new window resizing core is hooked */
          if (  window_custom_size_enable
             && settings->uints.window_position_width
-            && settings->uints.window_position_height)
+            && settings->uints.window_position_height
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+            /* TIERES: not the taskbar icon's size, saved by a window
+             * closed while minimized (opened with no client area) */
+            && win32_saved_window_size_usable(
+                  settings->uints.window_position_width,
+                  settings->uints.window_position_height)
+#endif
+            )
          {
             width  = settings->uints.window_position_width;
             height = settings->uints.window_position_height;
