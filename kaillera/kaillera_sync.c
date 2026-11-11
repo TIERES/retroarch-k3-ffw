@@ -1825,7 +1825,7 @@ typedef struct
       penalties - so a tied period's end is known at once (0 = engine
       without them: WE2002 waits to see what follows). */
    size_t   settings;
-   /* WE2002 and WE4: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
+   /* WE2002, WE4 and WE3: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
       on - shots, offsides, fouls, red cards (a second yellow isn't one),
       yellow cards, corners (then free kicks and penalty kicks, not sent);
       each player's cards, a byte per roster index (cards[side] + index:
@@ -1878,7 +1878,9 @@ static const ksync_we_map ksync_we_maps[] = {
         state at 2) and the state - all in the scratchpad. */
      WE_SCR | 0x2DF, WE_SCR | 0x2DB, 0, WE_SCR | 0x2AC, WE_SCR | 0x29B, WE_SCR | 0x29A,
      3, 2, WE_SCR | 0x198, 0x10A2C2, 1, 0x10A307,
-     0, { 0, 0 }, 0 },
+     /* The RESULT numbers and each player's cards, as WE2002's - in the RAM,
+        right before the goal records (the injury list not found yet). */
+     0x1085B0, { 0x107F8D, 0x107FA3 }, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2261,7 +2263,12 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
 {
    static const char *const card_kinds[3] = { "y", "y2", "r" };
    unsigned side, i, k, minute = ksync_live_minute(phase, clock);
+   /* The side's roster: WE3 keeps one per team. */
+   size_t roster[2];
 
+   for (side = 0; side < 2; side++)
+      roster[side] = map->roster_team ? map->roster[0] + map->roster_team * ksync_live_team(st, map, side)
+                   : map->roster[side];
    for (side = 0; side < 2 && map->cards[0]; side++)
       for (i = 0; i < map->roster_len && i < 32; i++)
       {
@@ -2275,7 +2282,7 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
          for (k = 0; k < 3 && !quiet; k++)
             if (add & (1u << k))
                ksync_live_add(ksync_live.cards[side], &ksync_live.card_count[side], ram,
-                     map->roster[side] + map->name_len * i, map->name_len, minute, card_kinds[k]);
+                     roster[side] + map->name_len * i, map->name_len, minute, card_kinds[k]);
       }
    /* The injured players: the list only grows during the match (each
       record stays until the end; the game clears it at the match's load
@@ -2295,7 +2302,7 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
             continue;
          side = rec[1] == team0 ? 0 : 1; /* the same team on both sides: LOCAL */
          ksync_live_add(ksync_live.injuries[side], &ksync_live.injury_count[side], ram,
-               map->roster[side] + map->name_len * rec[0], map->name_len, minute, "y");
+               roster[side] + map->name_len * rec[0], map->name_len, minute, "y");
       }
       ksync_live.injury_seen = i;
    }
@@ -2603,10 +2610,14 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          ksync_live.active     = false; /* left the match */
       }
       /* WE3's extra time: periods 2 and 3, a third of the half - the card's
-         "half" (its clock starting to run) follows it. */
+         "half" (its clock starting to run) follows it (and the cards'
+         minute: ksync_live_minute()). */
       if (ksync_live.active && period >= 2 && period <= 3
             && clock >= ksync_live.prev_clock + KSYNC_LIVE_MIN_KICKOFF)
-         ksync_live.half = clock;
+      {
+         ksync_live.half  = clock;
+         ksync_live.extra = true;
+      }
    }
    /* The referee ended the period (map->state). The 2nd half or extra time
       with a winner, a golden goal (extra time's clock still running) or the
