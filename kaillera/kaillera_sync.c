@@ -1825,6 +1825,16 @@ typedef struct
       penalties - so a tied period's end is known at once (0 = engine
       without them: WE2002 waits to see what follows). */
    size_t   settings;
+   /* WE2002: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
+      on - shots, offsides, fouls, red cards (a second yellow isn't one),
+      yellow cards, corners (then free kicks and penalty kicks, not sent);
+      each player's cards, a byte per roster index (cards[side] + index:
+      1 yellow, 2 the second yellow - sent off -, 4 a direct red); and the
+      injured players: 4-byte records {roster index, team id, 0, 0}, FF =
+      the end of the list - 0 = engine without them. */
+   size_t   stats;
+   size_t   cards[2];
+   size_t   injuries;
 } ksync_we_map;
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
@@ -1838,7 +1848,8 @@ static const ksync_we_map ksync_we_maps[] = {
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
-     2, 0xFF, 0, 0, 0, 0 },
+     2, 0xFF, 0, 0, 0, 0,
+     0x756F2, { 0x75568, 0x7557F }, 0x73968 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -1849,7 +1860,8 @@ static const ksync_we_map ksync_we_maps[] = {
         LOCAL in phases 0/2 and the shootout, VISITA in 1/3), the restart
         (3 = a penalty, with the state at 2), the state and the settings. */
      0x7529F, 0x7529D, 0, 0x7B3DD, 0x75313, 0x75312,
-     3, 2, 0, 0, 0, 0x72FD2 },
+     3, 2, 0, 0, 0, 0x72FD2,
+     0, { 0, 0 }, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1863,7 +1875,8 @@ static const ksync_we_map ksync_we_maps[] = {
         periods 0/2, VISITA in 1/3), the restart (3 = a penalty, with the
         state at 2) and the state - all in the scratchpad. */
      WE_SCR | 0x2DF, WE_SCR | 0x2DB, 0, WE_SCR | 0x2AC, WE_SCR | 0x29B, WE_SCR | 0x29A,
-     3, 2, WE_SCR | 0x198, 0x10A2C2, 1, 0x10A307 },
+     3, 2, WE_SCR | 0x198, 0x10A2C2, 1, 0x10A307,
+     0, { 0, 0 }, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -1871,6 +1884,19 @@ static const ksync_we_map ksync_we_maps[] = {
 #define KSYNC_LIVE_MIN_KICKOFF      1800 /* a half of 30 s or more         */
 #define KSYNC_LIVE_OVER_FRAMES      600  /* WE3: 10 s with no time left = the end */
 #define KSYNC_LIVE_JSON_LEN         8192
+#define KSYNC_LIVE_EVENTS           24   /* cards / injuries kept per side */
+#define KSYNC_LIVE_INJURY_RECORDS   10   /* WE2002's injury list: the records it clears at a match's load */
+#define KSYNC_CARD_YELLOW           1
+#define KSYNC_CARD_SECOND           2    /* the second yellow: sent off */
+#define KSYNC_CARD_RED              4
+
+/* A card or an injury, for WE Camp: [name, minute, kind]. */
+typedef struct
+{
+   char     name[20];
+   unsigned minute;
+   const char *kind;  /* cards: "y", "y2", "r"; injuries: "y" (yellow cross), "r" (red cross) */
+} ksync_live_event;
 
 static struct
 {
@@ -1917,6 +1943,15 @@ static struct
    unsigned run_phase;      /* the phase + 1 the clock was last seen running in (0 = none) */
    unsigned drop_frame;     /* WE4: the ball stopped without the referee's whistle, since (0 = not) */
    bool     so_seen;        /* this match reached the shootout (its score is sent from then on) */
+   /* map->cards / map->injuries: the cards and injuries of this match, each
+      with the minute it was first seen (the RAM only has each player's
+      current card and the injured players) - ksync_live_events(). */
+   uint8_t  card_bits[2][32];  /* per roster index: the cards already listed (KSYNC_CARD_*) */
+   ksync_live_event cards[2][KSYNC_LIVE_EVENTS];
+   unsigned card_count[2];
+   ksync_live_event injuries[2][KSYNC_LIVE_EVENTS];
+   unsigned injury_count[2];
+   unsigned injury_seen;       /* records of the game's injury list already listed */
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -2177,8 +2212,106 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksyn
    }
    KSYNC_LIVE_MIX(ram, map->goals[0], 32 * map->goal_size);
    KSYNC_LIVE_MIX(ram, map->goals[1], 32 * map->goal_size);
+   /* A card / an injury (ksync_live_events()) - not the stats, sent along. */
+   h = (h ^ (ksync_live.card_count[0] | ksync_live.card_count[1] << 8
+         | ksync_live.injury_count[0] << 16 | ksync_live.injury_count[1] << 24)) * 16777619u;
 #undef KSYNC_LIVE_MIX
    return h;
+}
+
+/* The match minute, as the game writes it in its goal records: 0-44 the 1st
+   half, 45-89 the 2nd, 90-104 and 105-119 extra time (a half's stoppage
+   time stays at its last minute). Extra time's halves are a third of the
+   match's (ksync_live.half once its kickoff was seen). */
+static unsigned ksync_live_minute(unsigned phase, unsigned clock)
+{
+   unsigned half = ksync_live.half ? ksync_live.half : 18000;
+   unsigned span = phase >= 2 ? 15 : 45;
+   unsigned base = phase >= 4 ? 120 : phase >= 2 ? 90 + 15 * (phase - 2) : 45 * phase;
+   unsigned run;
+
+   if (phase >= 4)
+      return base;
+   if (phase >= 2 && !ksync_live.extra)
+      half = half / 3 ? half / 3 : 1;
+   run = clock < half ? half - clock : 0;
+   return base + (run ? (unsigned)(((uint64_t)span * run - 1) / half) : 0);
+}
+
+static void ksync_live_add(ksync_live_event *list, unsigned *count, const uint8_t *ram,
+      size_t name, unsigned name_len, unsigned minute, const char *kind)
+{
+   ksync_live_event *e;
+
+   if (*count >= KSYNC_LIVE_EVENTS)
+      return;
+   e = &list[(*count)++];
+   ksync_live_name(ram, name, name_len, e->name, sizeof(e->name));
+   e->minute = minute;
+   e->kind   = kind;
+}
+
+/* Every sample of a match: the cards and injuries that showed up since the
+   last one, at this minute - the RAM only keeps each player's card (and
+   which players are hurt), not when. quiet: only take them as seen. */
+static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      unsigned phase, unsigned clock, bool quiet)
+{
+   static const char *const card_kinds[3] = { "y", "y2", "r" };
+   unsigned side, i, k, minute = ksync_live_minute(phase, clock);
+
+   for (side = 0; side < 2 && map->cards[0]; side++)
+      for (i = 0; i < map->roster_len && i < 32; i++)
+      {
+         unsigned v    = ram[map->cards[side] + i];
+         /* A second yellow means a first one before it. */
+         unsigned want = ((v & 3) ? KSYNC_CARD_YELLOW : 0) | (v & KSYNC_CARD_SECOND) | (v & KSYNC_CARD_RED);
+         unsigned add  = want & ~ksync_live.card_bits[side][i];
+         if (!add || v > 7) /* other bits: not the cards (outside a match) */
+            continue;
+         ksync_live.card_bits[side][i] |= add;
+         for (k = 0; k < 3 && !quiet; k++)
+            if (add & (1u << k))
+               ksync_live_add(ksync_live.cards[side], &ksync_live.card_count[side], ram,
+                     map->roster[side] + map->name_len * i, map->name_len, minute, card_kinds[k]);
+      }
+   /* The injured players: the list only grows during the match (each
+      record stays until the end; the game clears it at the match's load
+      and after its end). Its record is {roster index, team id, 0, 0} for a
+      yellow cross - the red cross (the player leaves the field) not seen
+      yet: every one goes as a yellow cross for now. */
+   if (map->injuries)
+   {
+      for (i = ksync_live.injury_seen; i < KSYNC_LIVE_INJURY_RECORDS; i++)
+      {
+         const uint8_t *rec = ram + map->injuries + 4 * i;
+         unsigned team0     = ksync_live_team(st, map, 0);
+         if (rec[0] == 0xFF)
+            break; /* the end of the list */
+         if (quiet || rec[0] >= map->roster_len
+               || (rec[1] != team0 && rec[1] != ksync_live_team(st, map, 1)))
+            continue;
+         side = rec[1] == team0 ? 0 : 1; /* the same team on both sides: LOCAL */
+         ksync_live_add(ksync_live.injuries[side], &ksync_live.injury_count[side], ram,
+               map->roster[side] + map->name_len * rec[0], map->name_len, minute, "y");
+      }
+      ksync_live.injury_seen = i;
+   }
+}
+
+/* The cards and injuries of one side, for ksync_live_json(). */
+static int ksync_live_events_json(char *out, size_t cap, const char *field,
+      const ksync_live_event *list, unsigned count)
+{
+   unsigned i;
+   int n = snprintf(out, cap, ",\"%s\":[", field);
+
+   for (i = 0; i < count && n > 0 && (size_t)n < cap; i++)
+      n += snprintf(out + n, cap - n, "%s[\"%s\",%u,\"%s\"]", i ? "," : "",
+            list[i].name, list[i].minute, list[i].kind);
+   if (n > 0 && (size_t)n < cap)
+      n += snprintf(out + n, cap - n, "]");
+   return n;
 }
 
 /* The state for WE Camp (wg-camp's app/live.py parse_state()). v2: the
@@ -2261,7 +2394,23 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
                scorer, goals[gs * i + 2], assist, *kind ? ",\"" : "", kind, *kind ? "\"" : "");
       }
       if (n > 0 && (size_t)n < cap)
-         n += snprintf(out + n, cap - n, "]}");
+         n += snprintf(out + n, cap - n, "]");
+      /* WE2002: the RESULT screen's numbers (WE Camp shows them at the
+         end), the cards and the injuries. */
+      if (map->stats && n > 0 && (size_t)n < cap)
+      {
+         const uint8_t *s = ram + map->stats + side;
+         n += snprintf(out + n, cap - n, ",\"stats\":{\"shots\":%u,\"offsides\":%u,\"fouls\":%u,"
+               "\"yellow\":%u,\"red\":%u,\"corners\":%u}", s[0], s[2], s[4], s[8], s[6], s[10]);
+      }
+      if (map->cards[0] && n > 0 && (size_t)n < cap)
+         n += ksync_live_events_json(out + n, cap - n, "cards",
+               ksync_live.cards[side], ksync_live.card_count[side]);
+      if (map->injuries && n > 0 && (size_t)n < cap)
+         n += ksync_live_events_json(out + n, cap - n, "injuries",
+               ksync_live.injuries[side], ksync_live.injury_count[side]);
+      if (n > 0 && (size_t)n < cap)
+         n += snprintf(out + n, cap - n, "}");
    }
    if (n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "]}");
@@ -2322,6 +2471,14 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
    ksync_live.decided       = false;
    ksync_live.so_since      = 0;
    ksync_live.whistle       = 0;
+   memset(ksync_live.card_bits, 0, sizeof(ksync_live.card_bits));
+   ksync_live.card_count[0]   = ksync_live.card_count[1]   = 0;
+   ksync_live.injury_count[0] = ksync_live.injury_count[1] = 0;
+   ksync_live.injury_seen     = 0;
+   /* A kickoff: the cards and injuries the game still has then (a restarted
+      match) are from before it - only a match joined midway lists them. */
+   if (kickoff && (map->cards[0] || map->injuries))
+      ksync_live_events(ram, st, map, 0, 0, true);
 }
 
 static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *scratch,
@@ -2581,6 +2738,8 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.prev_in_match = in_match;
    if (!ksync_live.active)
       return;
+   if (map->cards[0] || map->injuries)
+      ksync_live_events(ram, st, map, phase, clock, false);
    /* The first seconds after the kickoff whistle: nothing goes yet - the
       players may still leave the match (wrong kits...) and start it again
       without it counting (no card, no interrupted match). From the whistle
