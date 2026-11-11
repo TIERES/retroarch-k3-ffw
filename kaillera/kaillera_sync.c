@@ -1825,7 +1825,7 @@ typedef struct
       penalties - so a tied period's end is known at once (0 = engine
       without them: WE2002 waits to see what follows). */
    size_t   settings;
-   /* WE2002: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
+   /* WE2002 and WE4: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
       on - shots, offsides, fouls, red cards (a second yellow isn't one),
       yellow cards, corners (then free kicks and penalty kicks, not sent);
       each player's cards, a byte per roster index (cards[side] + index:
@@ -1861,7 +1861,9 @@ static const ksync_we_map ksync_we_maps[] = {
         (3 = a penalty, with the state at 2), the state and the settings. */
      0x7529F, 0x7529D, 0, 0x7B3DD, 0x75313, 0x75312,
      3, 2, 0, 0, 0, 0x72FD2,
-     0, { 0, 0 }, 0 },
+     /* The RESULT numbers and each player's cards, as WE2002's (the injury
+        list not found yet). */
+     0x75283, { 0x750FF, 0x75115 }, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
