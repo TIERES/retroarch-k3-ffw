@@ -8066,6 +8066,8 @@ void core_run(void)
    }
 #endif
 
+   kailleraBroadcasterStartIfRequested();
+
    if (kailleraNetplay) {
 
       current_core_frame++;

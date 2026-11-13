@@ -355,6 +355,7 @@ int (WINAPI* kailleraSelectServerDialogF)(HWND parent);
 int (WINAPI* kailleraModifyPlayValuesF)(void* values, int size);
 int (WINAPI* kailleraChatSendF)(char* text);
 int (WINAPI* kailleraInitF)();
+int (WINAPI* kailleraWatchSessionF)(const char*, const char*);
 int (WINAPI* kailleraShutdownF)();
 int (WINAPI* kailleraEndGameF)();
 /* Optional - not part of the standard Kaillera client API, so only real/newer
@@ -772,6 +773,7 @@ void LoadKaillera() {
 #ifdef _WIN64
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "kailleraGetVersion");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraInit");
+      kailleraWatchSessionF = (int (WINAPI*)(const char*, const char*)) GetProcAddress(kailleraDLL, "kailleraWatchSession");
       kailleraShutdownF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraShutdown");
       kailleraSetInfosF = (int (WINAPI*)(kailleraInfos * infos)) GetProcAddress(kailleraDLL, "kailleraSetInfos");
       kailleraSelectServerDialogF = (int (WINAPI*)(HWND parent)) GetProcAddress(kailleraDLL, "kailleraSelectServerDialog");
@@ -810,6 +812,7 @@ void LoadKaillera() {
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
+      kailleraWatchSessionF = (int (WINAPI*)(const char*, const char*)) GetProcAddress(kailleraDLL, "_kailleraWatchSession@8");
       kailleraShutdownF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraShutdown@0");
       kailleraSetInfosF = (int (WINAPI*)(kailleraInfos * infos)) GetProcAddress(kailleraDLL, "_kailleraSetInfos@4");
       kailleraSelectServerDialogF = (int (WINAPI*)(HWND parent)) GetProcAddress(kailleraDLL, "_kailleraSelectServerDialog@4");
@@ -870,6 +873,25 @@ void LoadKaillera() {
 }
 
 #endif
+
+void kailleraBroadcasterStartIfRequested(void) {
+#ifdef _WIN32
+   static bool attempted = false;
+   char enabled[8] = {0};
+   char session_id[256] = {0};
+   char room_name[256] = "WE Camp";
+   if (attempted || !GetEnvironmentVariableA("WECAMP_BROADCASTER", enabled, sizeof(enabled)))
+      return;
+   if (!GetEnvironmentVariableA("WECAMP_WATCH_SESSION_ID", session_id, sizeof(session_id)))
+      return;
+   attempted = true;
+   if (!GetEnvironmentVariableA("WECAMP_WATCH_ROOM", room_name, sizeof(room_name)))
+      strcpy(room_name, "WE Camp");
+   LoadKaillera();
+   if (kailleraWatchSessionF == NULL)
+      RARCH_ERR("WE Camp broadcaster: DLL does not provide direct Watch Live support\n");
+#endif
+}
 
 int kailleraSyncData(void* value, const int len) {
 #if defined(N02_WIN32) || defined(N02_LINUX)
@@ -1934,6 +1956,9 @@ static void PlaybackToolbarEnsureCreated(void) {
 }
 
 static void PlaybackToolbarSetVisible(bool visible) {
+   char broadcaster[8] = {0};
+   if (GetEnvironmentVariableA("WECAMP_BROADCASTER", broadcaster, sizeof(broadcaster)))
+      visible = false;
    if (visible) {
       PlaybackToolbarEnsureCreated();
       if (s_pb_toolbar) {

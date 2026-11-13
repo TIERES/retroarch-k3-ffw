@@ -45,6 +45,7 @@ extern int kaillera_swap_cntr;
 
 void input_state_kaillera(unsigned port, unsigned device, unsigned idx, unsigned id);
 void LoadKaillera();
+void kailleraBroadcasterStartIfRequested(void);
 int kailleraSyncData(void* value, const int len);
 void EndKailleraGame();
 void GetClientVersion(char* version);
