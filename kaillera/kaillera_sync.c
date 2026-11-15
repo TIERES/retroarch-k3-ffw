@@ -1779,7 +1779,9 @@ typedef struct
    size_t   pads;         /* pads 1-4: 0 LOCAL, 1 VISITA, FF none (0 = no table: 1P LOCAL, 2P VISITA) */
    /* Team select screen only (the match overwrites them): a pointer per team
       to its name and either a pointer per team to its 3-letter code or the
-      codes themselves, team 0 last, 4 bytes each ending at sel_codes. */
+      codes themselves, team 0 last, 4 bytes each ending at sel_codes (0 =
+      no codes: J.League 2001, whose names are there from the formation
+      screen through the 1st half instead). */
    size_t   sel_names;
    size_t   sel_codes;
    bool     code_ptrs;
@@ -1888,6 +1890,23 @@ static const ksync_we_map ksync_we_maps[] = {
      0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
      /* The shirt numbers, 22 per team. */
      0x1346DC, 22 },
+   /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
+      the same structures and values, moved, with 26 players per team. The
+      team names are short and in English ("ANTLERS"), with no 3-letter
+      codes. Its injury records' 3rd byte went to 1 on a player hurt
+      earlier when another one got hurt (meaning unknown - ignored, as
+      WE2002's). Not seen yet: extra time, golden goal, the shootout (its
+      phase and score are where WE2002's are, next to the score) and its
+      state byte (WE2002's 0x7571C - not used), the match settings. */
+   { "SLPM_868.35", "JWE2001",
+     { { 0x1701C, { 0x80, 0x2E, 0x03, 0x3C, 0x80, 0x80, 0x63, 0x34, 0x18, 0x00, 0x02, 0x3C, 0xFF, 0x80, 0x42, 0x34 } },
+       { 0x1D038, { 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00, 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00 } } },
+     false, 0x70F9C, 0x70F9E, 0x713A4, 0, 0x7114C,
+     { 0x71008, 0x71088 }, 4, { 0x60D40, 0x60EE0 }, 0, 26, 16, 0x71325,
+     0x159F50, 0, false, false, false, false, 0,
+     0x71158, 0x71156, 0, 0x772C9, 0x76F21, 0x711CE,
+     2, 0xFF, 0, 0, 0, 0,
+     0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2152,9 +2171,10 @@ static size_t ksync_live_ptr(const uint8_t *ram, size_t addr)
    return ptr >= 0x80000000u && ptr < 0x80000000u + WE_RAM_SIZE ? ptr & 0x1FFFFF : 0;
 }
 
-/* While the team select screen is up: every team's name and code, kept for
-   the match (which overwrites them). Taken only when the whole table reads
-   as one - from team 0 on, past both teams picked now. */
+/* While the team select screen is up (J.League 2001: the formation screen,
+   before the kickoff): every team's name and code, kept for the match
+   (which overwrites them). Taken only when the whole table reads as one -
+   from team 0 on, past both teams picked now. */
 static void ksync_live_capture_names(const uint8_t *ram, const uint8_t *st,
       const ksync_we_map *map)
 {
@@ -2166,13 +2186,17 @@ static void ksync_live_capture_names(const uint8_t *ram, const uint8_t *st,
    for (id = 0; id < WE_TEAMS; id++)
    {
       size_t name = ksync_live_ptr(ram, map->sel_names + 4 * id);
-      size_t code = map->code_ptrs ? ksync_live_ptr(ram, map->sel_codes + 4 * id)
+      size_t code = !map->sel_codes ? 0
+                  : map->code_ptrs ? ksync_live_ptr(ram, map->sel_codes + 4 * id)
                   : map->sel_codes - 4 * id;
-      if (!name || !code || (!map->code_ptrs && ram[code + 3] != 0))
+      if (!name || (map->sel_codes && (!code || (!map->code_ptrs && ram[code + 3] != 0))))
          break;
       ksync_live_name(ram, name, 24, names[id], sizeof(names[id]));
-      ksync_live_name(ram, code, 4, codes[id], sizeof(codes[id]));
-      if (!ksync_live_plain(names[id], sizeof(names[id]), map->mixed_case) || strlen(codes[id]) != 3)
+      codes[id][0] = '\0';
+      if (map->sel_codes)
+         ksync_live_name(ram, code, 4, codes[id], sizeof(codes[id]));
+      if (!ksync_live_plain(names[id], sizeof(names[id]), map->mixed_case)
+            || (map->sel_codes && strlen(codes[id]) != 3))
          break;
       count++;
    }
