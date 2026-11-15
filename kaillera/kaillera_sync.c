@@ -1842,11 +1842,30 @@ typedef struct
       Shift-JIS) goes as "#" and the number (0 = engine without them). */
    size_t   numbers;
    size_t   numbers_team;
+   /* J.League 2001: settings is three bytes, not bits - extra time, golden
+      goal, penalties, each 0 or 1. */
+   bool     settings_bytes;
+   /* J.League 2001: the game's own team names by team id, for when the
+      formation screen (the names' only place in the RAM) wasn't opened -
+      a name read from the RAM wins (a patch may rename teams). */
+   const char *const *fixed_names;
+   unsigned fixed_count;
 } ksync_we_map;
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
 #define WE_SET_PENS   4
 #define WE_STATE_OVER 10
+
+/* J.League Jikkyou Winning Eleven 2001's short team names (its formation
+   screen's table at 0x80159F50), by team id. */
+static const char *const ksync_jwe2001_names[] = {
+   "CONSADO", "ANTLERS", "URAWA R", "JEF UTD", "K.REYSO", "FCTOKYO", "VERDY", "F-MARIN",
+   "S-PULSE", "JUBILO", "GRAMPUS", "GAMBA O", "CEREZO", "VISSEL", "SANFREC", "AVISPA",
+   "VEGALTA", "MONTEDI", "HOLLY H", "OM.ARDIJA", "K.FRONT", "YOKOHAM", "S.BELLM", "VENTFORET K",
+   "ALBIREX NI.", "PURPLE", "SAGAN T", "OITA T.", "J1 EAST", "J1 WEST", "J2 EAST", "J2 WEST",
+   "JAP.DREAMS", "WORLD DR.", "MANCHES", "ARSENAL", "MIL", "JUVENTU", "ROM", "BARCELO",
+   "REAL M."
+};
 
 static const ksync_we_map ksync_we_maps[] = {
    { "SLPM_870.56", "WE2002",
@@ -1856,7 +1875,7 @@ static const ksync_we_map ksync_we_maps[] = {
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
      2, 0xFF, 0, 0, 0, 0,
-     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0 },
+     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, false, NULL, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -1870,7 +1889,7 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, 0, 0, 0, 0x72FD2,
      /* The RESULT numbers and each player's cards, as WE2002's (the injury
         list not found yet). */
-     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0 },
+     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, false, NULL, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1889,15 +1908,19 @@ static const ksync_we_map ksync_we_maps[] = {
         right before the goal records (the injury list not found yet). */
      0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
      /* The shirt numbers, 22 per team. */
-     0x1346DC, 22 },
+     0x1346DC, 22, false, NULL, 0 },
    /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
-      the same structures and values, moved, with 26 players per team. The
-      team names are short and in English ("ANTLERS"), with no 3-letter
-      codes. Its injury records' 3rd byte went to 1 on a player hurt
-      earlier when another one got hurt (meaning unknown - ignored, as
-      WE2002's). Not seen yet: extra time, golden goal, the shootout (its
-      phase and score are where WE2002's are, next to the score) and its
-      state byte (WE2002's 0x7571C - not used), the match settings. */
+      the same structures and values, moved, with 26 players per team -
+      extra time (a third of the half) and the shootout too. The team names
+      are short and in English ("ANTLERS"), with no 3-letter codes, and only
+      in the RAM when the formation screen was opened (then through the 1st
+      half) - the game's own list otherwise. The settings (extra time,
+      golden goal, penalties) are three bytes right before the team ids,
+      set at the match's load. Its injury records' 3rd byte went to 1 on a
+      player hurt earlier when another one got hurt (meaning unknown -
+      ignored, as WE2002's). Not seen yet: a golden goal (its byte is the
+      middle one, as on the settings screen), the shootout's state byte
+      (WE2002's 0x7571C - not used: the referee's state ends it). */
    { "SLPM_868.35", "JWE2001",
      { { 0x1701C, { 0x80, 0x2E, 0x03, 0x3C, 0x80, 0x80, 0x63, 0x34, 0x18, 0x00, 0x02, 0x3C, 0xFF, 0x80, 0x42, 0x34 } },
        { 0x1D038, { 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00, 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00 } } },
@@ -1905,8 +1928,9 @@ static const ksync_we_map ksync_we_maps[] = {
      { 0x71008, 0x71088 }, 4, { 0x60D40, 0x60EE0 }, 0, 26, 16, 0x71325,
      0x159F50, 0, false, false, false, false, 0,
      0x71158, 0x71156, 0, 0x772C9, 0x76F21, 0x711CE,
-     2, 0xFF, 0, 0, 0, 0,
-     0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0 },
+     2, 0xFF, 0, 0, 0, 0x70F99,
+     0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0,
+     true, ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]) },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2404,11 +2428,14 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
       const uint8_t *goals = ram + map->goals[side];
       unsigned team        = ksync_live_team(st, map, side);
       bool known           = ksync_live.have_names && team < WE_TEAMS;
+      const char *name     = known ? ksync_live.names[team] : "";
 
+      /* No name read from the RAM: the game's own (map->fixed_names). */
+      if (!*name && map->fixed_names && team < map->fixed_count)
+         name = map->fixed_names[team];
       n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\","
             "\"goals\":%u,\"scorers\":[", side ? "," : "", team,
-            known ? ksync_live.names[team] : "", known ? ksync_live.codes[team] : "",
-            st[map->score + side]);
+            name, known ? ksync_live.codes[team] : "", st[map->score + side]);
       for (i = 0; i < 32 && goals[gs * i + 2] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
          char scorer[20], assist[20];
@@ -2669,7 +2696,9 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       no settings in RAM: in either half of extra time. */
    if (ksync_live.active && clock > 0)
       ksync_live.run_phase = phase + 1;
-   set     = map->settings ? ram[map->settings] : 0;
+   set     = !map->settings ? 0 : !map->settings_bytes ? ram[map->settings]
+         : (ram[map->settings] ? WE_SET_EXTRA : 0) | (ram[map->settings + 1] ? WE_SET_GOLDEN : 0)
+         | (ram[map->settings + 2] ? WE_SET_PENS : 0);
    time_up = (phase == 1 || phase == 3) && clock == 0 && ksync_live.run_phase == phase + 1;
    golden  = (phase == 2 || phase == 3) && clock > 0 && clock < ksync_live.half
          && (!map->settings || (set & WE_SET_GOLDEN));
