@@ -1916,11 +1916,13 @@ static const ksync_we_map ksync_we_maps[] = {
       in the RAM when the formation screen was opened (then through the 1st
       half) - the game's own list otherwise. The settings (extra time,
       golden goal, penalties) are three bytes right before the team ids,
-      set at the match's load. Its injury records' 3rd byte went to 1 on a
+      set at the match's load (the order is the settings screen's: golden
+      goal is the middle one either way; extra time and penalties only
+      seen on together). Its injury records' 3rd byte went to 1 on a
       player hurt earlier when another one got hurt (meaning unknown -
-      ignored, as WE2002's). Not seen yet: a golden goal (its byte is the
-      middle one, as on the settings screen), the shootout's state byte
-      (WE2002's 0x7571C - not used: the referee's state ends it). */
+      ignored, as WE2002's). Not seen yet: a golden goal, the shootout's
+      state byte (WE2002's 0x7571C - not used: the referee's state ends
+      it). */
    { "SLPM_868.35", "JWE2001",
      { { 0x1701C, { 0x80, 0x2E, 0x03, 0x3C, 0x80, 0x80, 0x63, 0x34, 0x18, 0x00, 0x02, 0x3C, 0xFF, 0x80, 0x42, 0x34 } },
        { 0x1D038, { 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00, 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00 } } },
@@ -1931,6 +1933,23 @@ static const ksync_we_map ksync_we_maps[] = {
      2, 0xFF, 0, 0, 0, 0x70F99,
      0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0,
      true, ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]) },
+   /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
+      WE2002's engine two years earlier: the same structures and values,
+      moved, with 22 players per team, and the team select screen's names
+      and 3-letter codes as WE2002's. The settings are WE3/WE4's bits
+      (extra time, golden goal, penalties - checked by changing the menu's
+      and seeing the match copy them), next to the team ids of a settings
+      block set at the match's load. Not seen yet: a golden goal, the
+      shootout's state byte (not used: the referee's state ends it). */
+   { "SLPM_866.00", "WE2000",
+     { { 0x1701C, { 0x03, 0x00, 0x60, 0x16, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x12, 0x21, 0x20, 0xC0, 0x02 } },
+       { 0x1D038, { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA2, 0x93, 0x08, 0x00, 0xBD, 0x27, 0x08, 0x00, 0xE0, 0x03 } } },
+     false, 0x750AC, 0x750AE, 0x75460, 0, 0x75244,
+     { 0x75108, 0x75188 }, 4, { 0x64518, 0x64678 }, 0, 22, 16, 0x7541D,
+     0xBD590, 0x7FAA0, false, false, false, false, 0,
+     0x75250, 0x7524E, 0, 0x7B385, 0x7AFDD, 0x752C6,
+     2, 0xFF, 0, 0, 0, 0x72A90,
+     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, false, NULL, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
