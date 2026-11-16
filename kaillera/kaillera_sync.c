@@ -834,6 +834,14 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
 
    if (!ok)
    {
+      if (!path_is_valid(content_path))
+      {
+         /* The ISO itself is missing: the match can't even load (the game
+            callback already said which file) - not a memory card problem. */
+         ksync_log("ISO não encontrada (%s): a partida não abre.", content_path);
+         ksync_no_memcard = true;
+         return;
+      }
       ksync_log("Memory Card online: não consegui ler o jogo (%s).", content_path);
       result = -1;
    }
