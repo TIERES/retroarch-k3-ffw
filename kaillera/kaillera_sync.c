@@ -1842,9 +1842,6 @@ typedef struct
       Shift-JIS) goes as "#" and the number (0 = engine without them). */
    size_t   numbers;
    size_t   numbers_team;
-   /* J.League 2001: settings is three bytes, not bits - extra time, golden
-      goal, penalties, each 0 or 1. */
-   bool     settings_bytes;
    /* J.League 2001: the game's own team names by team id, for when the
       formation screen (the names' only place in the RAM) wasn't opened -
       a name read from the RAM wins (a patch may rename teams). */
@@ -1875,7 +1872,7 @@ static const ksync_we_map ksync_we_maps[] = {
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
      2, 0xFF, 0, 0, 0, 0,
-     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, false, NULL, 0 },
+     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, NULL, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -1889,7 +1886,7 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, 0, 0, 0, 0x72FD2,
      /* The RESULT numbers and each player's cards, as WE2002's (the injury
         list not found yet). */
-     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, false, NULL, 0 },
+     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1908,21 +1905,20 @@ static const ksync_we_map ksync_we_maps[] = {
         right before the goal records (the injury list not found yet). */
      0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
      /* The shirt numbers, 22 per team. */
-     0x1346DC, 22, false, NULL, 0 },
+     0x1346DC, 22, NULL, 0 },
    /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
       the same structures and values, moved, with 26 players per team -
       extra time (a third of the half) and the shootout too. The team names
       are short and in English ("ANTLERS"), with no 3-letter codes, and only
       in the RAM when the formation screen was opened (then through the 1st
-      half) - the game's own list otherwise. The settings (extra time,
-      golden goal, penalties) are three bytes right before the team ids,
-      set at the match's load (the order is the settings screen's: golden
-      goal is the middle one either way; extra time and penalties only
-      seen on together). Its injury records' 3rd byte went to 1 on a
-      player hurt earlier when another one got hurt (meaning unknown -
-      ignored, as WE2002's). Not seen yet: a golden goal, the shootout's
-      state byte (WE2002's 0x7571C - not used: the referee's state ends
-      it). */
+      half) - the game's own list otherwise. The settings are WE3/WE4's
+      bits (checked by changing the menu's and seeing the match copy
+      them), in a settings block set at the match's load, the team ids 4
+      bytes after them - as WE2000's. Its injury records' 3rd byte went to
+      1 on a player hurt earlier when another one got hurt (meaning
+      unknown - ignored, as WE2002's). Not seen yet: a golden goal, the
+      shootout's state byte (WE2002's 0x7571C - not used: the referee's
+      state ends it). */
    { "SLPM_868.35", "JWE2001",
      { { 0x1701C, { 0x80, 0x2E, 0x03, 0x3C, 0x80, 0x80, 0x63, 0x34, 0x18, 0x00, 0x02, 0x3C, 0xFF, 0x80, 0x42, 0x34 } },
        { 0x1D038, { 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00, 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00 } } },
@@ -1930,9 +1926,9 @@ static const ksync_we_map ksync_we_maps[] = {
      { 0x71008, 0x71088 }, 4, { 0x60D40, 0x60EE0 }, 0, 26, 16, 0x71325,
      0x159F50, 0, false, false, false, false, 0,
      0x71158, 0x71156, 0, 0x772C9, 0x76F21, 0x711CE,
-     2, 0xFF, 0, 0, 0, 0x70F99,
+     2, 0xFF, 0, 0, 0, 0x6F288,
      0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0,
-     true, ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]) },
+     ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]) },
    /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
       WE2002's engine two years earlier: the same structures and values,
       moved, with 22 players per team, and the team select screen's names
@@ -1949,7 +1945,7 @@ static const ksync_we_map ksync_we_maps[] = {
      0xBD590, 0x7FAA0, false, false, false, false, 0,
      0x75250, 0x7524E, 0, 0x7B385, 0x7AFDD, 0x752C6,
      2, 0xFF, 0, 0, 0, 0x72A90,
-     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, false, NULL, 0 },
+     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2715,9 +2711,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       no settings in RAM: in either half of extra time. */
    if (ksync_live.active && clock > 0)
       ksync_live.run_phase = phase + 1;
-   set     = !map->settings ? 0 : !map->settings_bytes ? ram[map->settings]
-         : (ram[map->settings] ? WE_SET_EXTRA : 0) | (ram[map->settings + 1] ? WE_SET_GOLDEN : 0)
-         | (ram[map->settings + 2] ? WE_SET_PENS : 0);
+   set     = map->settings ? ram[map->settings] : 0;
    time_up = (phase == 1 || phase == 3) && clock == 0 && ksync_live.run_phase == phase + 1;
    golden  = (phase == 2 || phase == 3) && clock > 0 && clock < ksync_live.half
          && (!map->settings || (set & WE_SET_GOLDEN));
