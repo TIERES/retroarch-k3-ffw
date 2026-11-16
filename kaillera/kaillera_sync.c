@@ -17,6 +17,7 @@
 #include <libretro.h>
 #include <compat/strl.h>
 #include <encodings/crc32.h>
+#include <encodings/utf.h>
 #include <features/features_cpu.h>
 #include <file/file_path.h>
 #include <streams/file_stream.h>
@@ -795,6 +796,212 @@ static bool ksync_core_path_is_pcsx(const char *core_path)
    for (c = name; *c; c++)
       *c = (char)tolower((unsigned char)*c);
    return strstr(name, "pcsx") != NULL;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Content id for the Kaillera room's ISO check (before Start)              */
+/* ------------------------------------------------------------------------ */
+
+/* The last few games asked about, by file. Entering another room of the same
+   game doesn't read the whole ISO again while the file stays the same (same
+   size and last write - one downloaded again is hashed anew). A .cue/.m3u, or
+   an image a sidecar .cue takes over, is hashed on every request: the files
+   it points at can change on their own. */
+#define KSYNC_ID_SLOTS 4
+
+typedef struct
+{
+   char path[PATH_MAX_LENGTH];
+   bool pcsx;
+   int state;          /* 0 free, 1 hashing, 2 done, -1 unreadable */
+   unsigned token;     /* which request the running thread answers */
+   bool stamped;       /* size/mtime below count (a single image) */
+   uint64_t size;
+   uint64_t mtime;
+   char id[KSYNC_FIELD_LEN];
+} ksync_id_slot_t;
+
+typedef struct
+{
+   char path[PATH_MAX_LENGTH];
+   bool pcsx;
+   int slot;
+   unsigned token;
+   unsigned gen;
+} ksync_id_job_t;
+
+static ksync_id_slot_t ksync_ids[KSYNC_ID_SLOTS];
+static unsigned ksync_ids_next;
+static unsigned ksync_ids_token;
+
+static bool ksync_file_stamp(const char *path, uint64_t *size, uint64_t *mtime)
+{
+#ifdef _WIN32
+   WIN32_FILE_ATTRIBUTE_DATA fa;
+   wchar_t *wpath = utf8_to_utf16_string_alloc(path);
+   bool ok        = wpath && GetFileAttributesExW(wpath, GetFileExInfoStandard, &fa);
+   free(wpath);
+   if (!ok)
+      return false;
+   *size  = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+   *mtime = ((uint64_t)fa.ftLastWriteTime.dwHighDateTime << 32)
+          | fa.ftLastWriteTime.dwLowDateTime;
+   return true;
+#else
+   return false;
+#endif
+}
+
+static void ksync_id_thread(void *userdata)
+{
+   ksync_id_job_t *job = (ksync_id_job_t*)userdata;
+   char sidecar[PATH_MAX_LENGTH];
+   uint32_t crc   = 0;
+   uint64_t size  = 0;
+   uint64_t fsize = 0;
+   uint64_t mtime = 0;
+   const char *ext;
+   bool stamped;
+   bool ok;
+
+#ifdef _WIN32
+   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
+   /* Taken before reading: a file that changes meanwhile has another stamp
+      at the next request, and is hashed again then. */
+   ext     = path_get_extension(job->path);
+   stamped = !string_is_equal_noncase(ext, "cue")
+          && !string_is_equal_noncase(ext, "m3u")
+          && ksync_file_stamp(job->path, &fsize, &mtime);
+
+   sidecar[0] = '\0';
+   ok = ksync_hash_content(job->path, job->gen, &crc, &size, 0, job->pcsx, sidecar);
+
+   KSYNC_LOCK();
+   {
+      ksync_id_slot_t *s = &ksync_ids[job->slot];
+      if (s->state == 1 && s->token == job->token)
+      {
+         if (job->gen != ksync_gen)
+            s->state = 0;  /* a game started meanwhile - the check is moot */
+         else if (ok)
+         {
+            snprintf(s->id, sizeof(s->id), "%08X:%X", (unsigned)crc, (unsigned)size);
+            s->state   = 2;
+            s->stamped = stamped && !sidecar[0];
+            s->size    = fsize;
+            s->mtime   = mtime;
+         }
+         else
+         {
+            s->state   = -1;
+            s->stamped = false;
+         }
+      }
+   }
+   KSYNC_UNLOCK();
+
+   free(job);
+}
+
+int kailleraSyncContentId(const char *content_path, const char *core_path,
+      bool start, char *out, size_t len)
+{
+   ksync_id_slot_t *s = NULL;
+   ksync_id_job_t *job;
+   bool pcsx = ksync_core_path_is_pcsx(core_path);
+   int i, result;
+
+   if (out && len)
+      out[0] = '\0';
+   if (string_is_empty(content_path) || !path_is_valid(content_path))
+      return -1;
+
+   KSYNC_LOCK();
+   for (i = 0; i < KSYNC_ID_SLOTS; i++)
+      if (     ksync_ids[i].state != 0 && ksync_ids[i].pcsx == pcsx
+            && string_is_equal(ksync_ids[i].path, content_path))
+         s = &ksync_ids[i];
+
+   if (s && s->state == 1)
+   {
+      KSYNC_UNLOCK();
+      return 0;
+   }
+
+   if (s && start)
+   {
+      /* Asked again (another room): only a result of this very file counts -
+         an unreadable one, or a .cue's, is tried again. */
+      uint64_t fsize = 0, mtime = 0;
+      if (!(     s->state == 2 && s->stamped
+               && ksync_file_stamp(content_path, &fsize, &mtime)
+               && fsize == s->size && mtime == s->mtime))
+      {
+         s->state = 0;
+         s        = NULL;
+      }
+   }
+
+   if (s)
+   {
+      result = s->state == 2 ? 1 : -1;
+      if (result == 1 && out && len)
+         strlcpy(out, s->id, len);
+      KSYNC_UNLOCK();
+      return result;
+   }
+
+   if (!start || !(job = (ksync_id_job_t*)calloc(1, sizeof(*job))))
+   {
+      KSYNC_UNLOCK();
+      return -1;
+   }
+
+   /* A free slot, else the oldest one that isn't hashing. */
+   for (i = 0; i < KSYNC_ID_SLOTS && !s; i++)
+      if (ksync_ids[i].state == 0)
+         s = &ksync_ids[i];
+   for (i = 0; i < KSYNC_ID_SLOTS && !s; i++)
+   {
+      ksync_id_slot_t *c = &ksync_ids[(ksync_ids_next + i) % KSYNC_ID_SLOTS];
+      if (c->state != 1)
+         s = c;
+   }
+   if (!s)
+   {
+      KSYNC_UNLOCK();
+      free(job);
+      return 0; /* all of them busy - asked again in a second */
+   }
+   ksync_ids_next = (unsigned)(s - ksync_ids + 1) % KSYNC_ID_SLOTS;
+
+   memset(s, 0, sizeof(*s));
+   strlcpy(s->path, content_path, sizeof(s->path));
+   s->pcsx  = pcsx;
+   s->state = 1;
+   s->token = ++ksync_ids_token;
+
+   strlcpy(job->path, content_path, sizeof(job->path));
+   job->pcsx  = pcsx;
+   job->slot  = (int)(s - ksync_ids);
+   job->token = s->token;
+   job->gen   = ksync_gen;
+   KSYNC_UNLOCK();
+
+#ifdef HAVE_THREADS
+   {
+      sthread_t *thread = sthread_create(ksync_id_thread, job);
+      if (thread)
+      {
+         sthread_detach(thread);
+         return 0;
+      }
+   }
+#endif
+   ksync_id_thread(job);
+   return kailleraSyncContentId(content_path, core_path, false, out, len);
 }
 
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path)

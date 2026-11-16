@@ -482,6 +482,10 @@ int (WINAPI* kailleraWatchGoLiveLockedF)();
 int (WINAPI* kailleraStreamCheckStateRequestedF)();
 void (WINAPI* kailleraStreamUploadStateF)(int frameIndex, const void* data, int size);
 
+/* The room's ISO check - optional, same convention: a DLL that has it gets
+   kailleraContentIdForGame() (below) right after kailleraSetInfos(). */
+void (WINAPI* kailleraSetContentIdCallbackF)(int (WINAPI* callback)(const char* game, int start, char* out, int cap));
+
 
 
 void CloseKaillera() {
@@ -532,6 +536,7 @@ void CloseKaillera() {
    kailleraWatchGoLiveLockedF              = NULL;
    kailleraStreamCheckStateRequestedF      = NULL;
    kailleraStreamUploadStateF              = NULL;
+   kailleraSetContentIdCallbackF           = NULL;
 
    if (kailleraDLL)
       FreeLibrary(kailleraDLL);
@@ -801,6 +806,28 @@ static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
    return 1;
 }
 
+// The room's ISO check, before Start (kailleraclient.dll's kaillera_ui.cpp,
+// registered with kailleraSetContentIdCallback() below): "CRC32:SIZE" of a
+// game in our list - the file nGameLoad() opens for that name, hashed the way
+// kaillera_sync.c's fingerprint does at game start. The DLL asks from its
+// window's thread as the player enters a room (start = 1) and then once a
+// second (start = 0) - it never blocks: 1 = `out` has the id, 0 = still
+// hashing, -1 = not in the list or unreadable.
+static int WINAPI kailleraContentIdForGame(const char* game, int start, char* out, int cap) {
+   const char* p = kailleraRomNames;
+   int i;
+
+   if (game == NULL || out == NULL || cap <= 0)
+      return -1;
+   out[0] = '\0';
+   for (i = 0; i < totalGames; i++) {
+      if (strncmp(p, game, strlen(p)) == 0) /* nGameLoad()'s own match */
+         return kailleraSyncContentId(filePathK[i], corePaths[i], start != 0, out, (size_t)cap);
+      p += strlen(p) + 1;
+   }
+   return -1;
+}
+
 static int InitialiseKaillera() {
    kailleraInfos kInfos;
 
@@ -813,6 +840,9 @@ static int InitialiseKaillera() {
    kInfos.findOrBrowseGameCallback = kailleraFindOrBrowseGame;
    kailleraInitF();
    kailleraSetInfosF(&kInfos);
+   /* A DLL with the room's ISO check learns how to get a game's id. */
+   if (kailleraSetContentIdCallbackF != NULL)
+      kailleraSetContentIdCallbackF(kailleraContentIdForGame);
    KailleraHandle = CreateThread(NULL, 0, kailleraThread, NULL, 0, 0);
 
    kailleraInitialised = true;
@@ -867,6 +897,7 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchGoLiveLocked");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraStreamCheckStateRequested");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadState");
+      kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "kailleraSetContentIdCallback");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -905,6 +936,7 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchGoLiveLocked@0");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraStreamCheckStateRequested@0");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadState@12");
+      kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "_kailleraSetContentIdCallback@4");
 #endif
 
       if (kailleraGetVersionF != NULL &&
