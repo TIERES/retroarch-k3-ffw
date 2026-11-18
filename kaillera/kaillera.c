@@ -234,7 +234,11 @@ static void WINAPI kailleraChatReceivedCallback(char* nick, char* text)
       snprintf(new_msg, sizeof(new_msg), "%s: %s", nick, text);
 
    if (strlen(new_msg) > 0) {
-      runloop_msg_queue_push(new_msg, 0, 5 * 60, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      /* The DLL's own notices (nick "WE Camp" - the game's WE Camp accounts,
+         "joguem ate o fim") stay 15 s, long enough to read them all (Walter,
+         2026-11-18); players' chat 5 s. */
+      unsigned frames = (nick && strcmp(nick, "WE Camp") == 0) ? 15 * 60 : 5 * 60;
+      runloop_msg_queue_push(new_msg, 0, frames, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
    }
 }
 
