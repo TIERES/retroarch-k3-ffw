@@ -47,6 +47,10 @@ const record_driver_t *record_drivers[] = {
 #ifdef HAVE_FFMPEG
    &record_ffmpeg,
 #endif
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+   /* Only starts when WECAMP_BROADCASTER is set (init returns NULL otherwise). */
+   &record_wecamp,
+#endif
    &record_null,
    NULL,
 };

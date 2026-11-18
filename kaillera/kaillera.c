@@ -367,6 +367,8 @@ void LoadKaillera() {
 
 /* Original Kaillera Implementation */
 #include "kailleraclient.h"
+#include "retroarch.h"             /* retroarch_main_quit - broadcaster exits after its session */
+#include "record/record_driver.h"  /* recording_init/deinit - broadcaster stream output */
 
 static HINSTANCE kailleraDLL;
 static HANDLE KailleraHandle;
@@ -970,22 +972,170 @@ void LoadKaillera() {
 
 #endif
 
+/* WE Camp broadcaster (WECAMP_BROADCASTER set): one Watch Live session per
+   RetroArch process. Start it, stream the game through the "wecamp" record
+   driver (record/drivers/record_wecamp.c -> ffmpeg.exe -> YouTube) while it
+   runs, and quit when it ends, so the process that launched us knows the
+   broadcast is over. */
+static int s_bc_enabled = -1;  /* -1 = not checked yet */
+static bool s_bc_started, s_bc_game_seen, s_bc_rec_tried, s_bc_ff, s_bc_stopping;
+static ULONGLONG s_bc_start_ms;
+/* WECAMP_BROADCAST_FROM_FRAME: fast-forward (not streamed) up to this frame,
+   then start the stream - the match's kickoff minus a few seconds, so the
+   live starts at the match and not at the menus before it. */
+static unsigned s_bc_from_frame;
+/* WECAMP_CONTROL_FILE: the agent writes "stop_frame=N" there when the match
+   ends on the site (the room may go on with another match); the stream
+   stops when the game reaches frame N. */
+static char s_bc_control[MAX_PATH];
+static unsigned s_bc_stop_frame;
+static bool s_bc_has_stop;
+
+static void PlaybackSetFastForward(bool on);
+
+static void kailleraBroadcasterReadControl(void) {
+#ifdef _WIN32
+   char buf[64] = {0};
+   DWORD n = 0;
+   const char *p;
+   HANDLE h = CreateFileA(s_bc_control, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+   if (h == INVALID_HANDLE_VALUE)
+      return;
+   ReadFile(h, buf, sizeof(buf) - 1, &n, NULL);
+   CloseHandle(h);
+   if ((p = strstr(buf, "stop_frame=")) != NULL) {
+      unsigned v = (unsigned)strtoul(p + 11, NULL, 10);
+      if (!s_bc_has_stop || v != s_bc_stop_frame)
+         RARCH_LOG("[WE Camp]: stop requested at frame %u (now %u)\n", v, (unsigned)current_core_frame);
+      s_bc_stop_frame = v;
+      s_bc_has_stop   = true;
+   }
+#endif
+}
+
+static bool kailleraBroadcasterEnabled(void) {
+#ifdef _WIN32
+   if (s_bc_enabled < 0) {
+      char v[8];
+      s_bc_enabled = GetEnvironmentVariableA("WECAMP_BROADCASTER", v, sizeof(v)) ? 1 : 0;
+   }
+   return s_bc_enabled == 1;
+#else
+   return false;
+#endif
+}
+
+static void kailleraBroadcasterQuit(const char *why) {
+   RARCH_LOG("[WE Camp]: %s - closing the broadcaster\n", why);
+   retroarch_main_quit();
+}
+
+static void kailleraBroadcasterRecordStart(void) {
+#ifdef _WIN32
+   recording_state_t *rec = recording_state_get_ptr();
+   char url[8];
+   if (!GetEnvironmentVariableA("WECAMP_STREAM_URL", url, sizeof(url))) {
+      RARCH_LOG("[WE Camp]: no WECAMP_STREAM_URL - watching without streaming\n");
+      return;
+   }
+   if (rec->data)
+      return;
+   /* CMD_EVENT_RECORD_INIT is refused during Kaillera games (kailleraNetplay),
+      so go through recording_init() directly. A non-empty path skips the
+      dated file name; record_wecamp reads the real URL (with the stream key)
+      from the environment, keeping the key out of the log. */
+   rec->enable = true;
+   strlcpy(rec->path, "wecamp", sizeof(rec->path));
+   if (!recording_init()) {
+      RARCH_ERR("[WE Camp]: could not start the stream output\n");
+      rec->enable  = false;
+      rec->path[0] = '\0';
+   }
+#endif
+}
+
+static void kailleraBroadcasterRecordStop(void) {
+   recording_state_t *rec = recording_state_get_ptr();
+   if (rec->data)
+      recording_deinit(); /* waits for ffmpeg to flush and close the stream */
+   rec->enable  = false;
+   rec->path[0] = '\0';
+}
+
+/* Called at the top of every core_run(). */
 void kailleraBroadcasterStartIfRequested(void) {
 #ifdef _WIN32
-   static bool attempted = false;
-   char enabled[8] = {0};
-   char session_id[256] = {0};
-   char room_name[256] = "WE Camp";
-   if (attempted || !GetEnvironmentVariableA("WECAMP_BROADCASTER", enabled, sizeof(enabled)))
+   if (!kailleraBroadcasterEnabled())
       return;
-   if (!GetEnvironmentVariableA("WECAMP_WATCH_SESSION_ID", session_id, sizeof(session_id)))
+
+   if (!s_bc_started) {
+      char session_id[256] = {0};
+      char room_name[256] = "WE Camp";
+      s_bc_started  = true;
+      s_bc_start_ms = GetTickCount64();
+      if (!GetEnvironmentVariableA("WECAMP_WATCH_SESSION_ID", session_id, sizeof(session_id))) {
+         RARCH_ERR("[WE Camp]: WECAMP_WATCH_SESSION_ID is not set\n");
+         kailleraBroadcasterQuit("no session to watch");
+         return;
+      }
+      if (!GetEnvironmentVariableA("WECAMP_WATCH_ROOM", room_name, sizeof(room_name)))
+         strcpy(room_name, "WE Camp");
+      {
+         char v[32];
+         if (GetEnvironmentVariableA("WECAMP_BROADCAST_FROM_FRAME", v, sizeof(v)))
+            s_bc_from_frame = (unsigned)strtoul(v, NULL, 10);
+      }
+      if (!GetEnvironmentVariableA("WECAMP_CONTROL_FILE", s_bc_control, sizeof(s_bc_control)))
+         s_bc_control[0] = '\0';
+      RARCH_LOG("[WE Camp]: broadcaster starting Watch Live session %s (%s), stream from frame %u\n",
+            session_id, room_name, s_bc_from_frame);
+      /* The DLL's headless loop reads the same variables and starts Watch Live. */
+      LoadKaillera();
+      if (kailleraWatchSessionF == NULL)
+         RARCH_ERR("WE Camp broadcaster: DLL does not provide direct Watch Live support\n");
       return;
-   attempted = true;
-   if (!GetEnvironmentVariableA("WECAMP_WATCH_ROOM", room_name, sizeof(room_name)))
-      strcpy(room_name, "WE Camp");
-   LoadKaillera();
-   if (kailleraWatchSessionF == NULL)
-      RARCH_ERR("WE Camp broadcaster: DLL does not provide direct Watch Live support\n");
+   }
+
+   if (kailleraNetplay) {
+      s_bc_game_seen = true;
+      if (!s_bc_rec_tried) {
+         if ((unsigned)current_core_frame < s_bc_from_frame) {
+            /* Catching up to the kickoff: as fast as the CPU goes, nothing
+               streamed (record_wecamp also drops fast-forward frames). */
+            PlaybackSetFastForward(true);
+            s_bc_ff = true;
+         } else {
+            if (s_bc_ff) {
+               PlaybackSetFastForward(false);
+               s_bc_ff = false;
+            }
+            s_bc_rec_tried = true; /* one attempt per process/game */
+            kailleraBroadcasterRecordStart();
+         }
+      }
+      if (s_bc_control[0] && (current_core_frame % 60) == 0)
+         kailleraBroadcasterReadControl();
+      if (s_bc_has_stop && !s_bc_stopping && (unsigned)current_core_frame >= s_bc_stop_frame) {
+         /* The match is over on the site: end like the session ended
+            (stream closed cleanly, then quit). */
+         s_bc_stopping = true;
+         RARCH_LOG("[WE Camp]: reached stop frame %u\n", s_bc_stop_frame);
+         EndKailleraGame();
+      }
+   }
+   else if (!s_bc_game_seen) {
+      /* The session never started (wrong id, already over, server down):
+         don't stay open forever. */
+      char v[16];
+      ULONGLONG limit_s = 120;
+      if (GetEnvironmentVariableA("WECAMP_BROADCASTER_START_TIMEOUT", v, sizeof(v)) && atoi(v) > 0)
+         limit_s = (ULONGLONG)atoi(v);
+      if (GetTickCount64() - s_bc_start_ms > limit_s * 1000) {
+         s_bc_game_seen = true; /* quit once */
+         kailleraBroadcasterQuit("the Watch Live game did not start in time");
+      }
+   }
 #endif
 }
 
@@ -2703,6 +2853,10 @@ void kailleraChatSendExternal(const char* messge) {
 
 void EndKailleraGame() {
    if (kailleraInitialisedInternal) {
+      bool broadcaster_end = kailleraBroadcasterEnabled();
+      /* Before the content closes: let ffmpeg finish the stream cleanly. */
+      if (broadcaster_end)
+         kailleraBroadcasterRecordStop();
       kailleraSyncGameEnd();
       kailleraWaitSaveLoad = 0;
       kailleraNetplay = false;
@@ -2721,6 +2875,8 @@ void EndKailleraGame() {
       if (kailleraMemcardFinishF != NULL)
          kailleraMemcardFinishF();
 #endif
+      if (broadcaster_end)
+         kailleraBroadcasterQuit("Watch Live session ended");
    }
 }
 

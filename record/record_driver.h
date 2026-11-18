@@ -134,6 +134,10 @@ struct recording
 typedef struct recording recording_state_t;
 
 extern const record_driver_t record_ffmpeg;
+#if defined(_WIN32) && !defined(_XBOX) && !defined(__WINRT__)
+/* WE Camp broadcaster: frames/audio -> external ffmpeg.exe (record_wecamp.c) */
+extern const record_driver_t record_wecamp;
+#endif
 
 /**
  * config_get_record_driver_options:
