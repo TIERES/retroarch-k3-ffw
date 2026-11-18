@@ -5,6 +5,7 @@
 #define KAILLERA_SYNC_H
 
 #include <stdarg.h>
+#include <stddef.h>
 #include <boolean.h>
 
 /* Kaillera only keeps the players' *inputs* in lockstep - it assumes every
@@ -56,6 +57,16 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
    that folder - see kailleraSyncSaveDirectory()). On failure the match is
    played with no memory card. No-op for every other room/core. */
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path);
+
+/* The Kaillera room's ISO check, before Start (kaillera.c's
+   kailleraContentIdForGame(), asked by the DLL from its window's thread):
+   "CRC32:SIZE" of a game's content - the same value the fingerprint sends at
+   game start and the placar ao vivo uses. Never blocks: start = true hashes it
+   on a thread of its own (unless the same unchanged file was hashed already);
+   then 1 = `out` has it, 0 = still hashing (ask again), -1 = couldn't read it
+   (or a game started meanwhile). */
+int kailleraSyncContentId(const char *content_path, const char *core_path,
+      bool start, char *out, size_t len);
 
 /* RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY hook: the online cards' folder while
    such a game is loading/running, NULL otherwise. */

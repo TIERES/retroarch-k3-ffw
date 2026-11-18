@@ -17,6 +17,7 @@
 #include <libretro.h>
 #include <compat/strl.h>
 #include <encodings/crc32.h>
+#include <encodings/utf.h>
 #include <features/features_cpu.h>
 #include <file/file_path.h>
 #include <streams/file_stream.h>
@@ -797,6 +798,212 @@ static bool ksync_core_path_is_pcsx(const char *core_path)
    return strstr(name, "pcsx") != NULL;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Content id for the Kaillera room's ISO check (before Start)              */
+/* ------------------------------------------------------------------------ */
+
+/* The last few games asked about, by file. Entering another room of the same
+   game doesn't read the whole ISO again while the file stays the same (same
+   size and last write - one downloaded again is hashed anew). A .cue/.m3u, or
+   an image a sidecar .cue takes over, is hashed on every request: the files
+   it points at can change on their own. */
+#define KSYNC_ID_SLOTS 4
+
+typedef struct
+{
+   char path[PATH_MAX_LENGTH];
+   bool pcsx;
+   int state;          /* 0 free, 1 hashing, 2 done, -1 unreadable */
+   unsigned token;     /* which request the running thread answers */
+   bool stamped;       /* size/mtime below count (a single image) */
+   uint64_t size;
+   uint64_t mtime;
+   char id[KSYNC_FIELD_LEN];
+} ksync_id_slot_t;
+
+typedef struct
+{
+   char path[PATH_MAX_LENGTH];
+   bool pcsx;
+   int slot;
+   unsigned token;
+   unsigned gen;
+} ksync_id_job_t;
+
+static ksync_id_slot_t ksync_ids[KSYNC_ID_SLOTS];
+static unsigned ksync_ids_next;
+static unsigned ksync_ids_token;
+
+static bool ksync_file_stamp(const char *path, uint64_t *size, uint64_t *mtime)
+{
+#ifdef _WIN32
+   WIN32_FILE_ATTRIBUTE_DATA fa;
+   wchar_t *wpath = utf8_to_utf16_string_alloc(path);
+   bool ok        = wpath && GetFileAttributesExW(wpath, GetFileExInfoStandard, &fa);
+   free(wpath);
+   if (!ok)
+      return false;
+   *size  = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+   *mtime = ((uint64_t)fa.ftLastWriteTime.dwHighDateTime << 32)
+          | fa.ftLastWriteTime.dwLowDateTime;
+   return true;
+#else
+   return false;
+#endif
+}
+
+static void ksync_id_thread(void *userdata)
+{
+   ksync_id_job_t *job = (ksync_id_job_t*)userdata;
+   char sidecar[PATH_MAX_LENGTH];
+   uint32_t crc   = 0;
+   uint64_t size  = 0;
+   uint64_t fsize = 0;
+   uint64_t mtime = 0;
+   const char *ext;
+   bool stamped;
+   bool ok;
+
+#ifdef _WIN32
+   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+
+   /* Taken before reading: a file that changes meanwhile has another stamp
+      at the next request, and is hashed again then. */
+   ext     = path_get_extension(job->path);
+   stamped = !string_is_equal_noncase(ext, "cue")
+          && !string_is_equal_noncase(ext, "m3u")
+          && ksync_file_stamp(job->path, &fsize, &mtime);
+
+   sidecar[0] = '\0';
+   ok = ksync_hash_content(job->path, job->gen, &crc, &size, 0, job->pcsx, sidecar);
+
+   KSYNC_LOCK();
+   {
+      ksync_id_slot_t *s = &ksync_ids[job->slot];
+      if (s->state == 1 && s->token == job->token)
+      {
+         if (job->gen != ksync_gen)
+            s->state = 0;  /* a game started meanwhile - the check is moot */
+         else if (ok)
+         {
+            snprintf(s->id, sizeof(s->id), "%08X:%X", (unsigned)crc, (unsigned)size);
+            s->state   = 2;
+            s->stamped = stamped && !sidecar[0];
+            s->size    = fsize;
+            s->mtime   = mtime;
+         }
+         else
+         {
+            s->state   = -1;
+            s->stamped = false;
+         }
+      }
+   }
+   KSYNC_UNLOCK();
+
+   free(job);
+}
+
+int kailleraSyncContentId(const char *content_path, const char *core_path,
+      bool start, char *out, size_t len)
+{
+   ksync_id_slot_t *s = NULL;
+   ksync_id_job_t *job;
+   bool pcsx = ksync_core_path_is_pcsx(core_path);
+   int i, result;
+
+   if (out && len)
+      out[0] = '\0';
+   if (string_is_empty(content_path) || !path_is_valid(content_path))
+      return -1;
+
+   KSYNC_LOCK();
+   for (i = 0; i < KSYNC_ID_SLOTS; i++)
+      if (     ksync_ids[i].state != 0 && ksync_ids[i].pcsx == pcsx
+            && string_is_equal(ksync_ids[i].path, content_path))
+         s = &ksync_ids[i];
+
+   if (s && s->state == 1)
+   {
+      KSYNC_UNLOCK();
+      return 0;
+   }
+
+   if (s && start)
+   {
+      /* Asked again (another room): only a result of this very file counts -
+         an unreadable one, or a .cue's, is tried again. */
+      uint64_t fsize = 0, mtime = 0;
+      if (!(     s->state == 2 && s->stamped
+               && ksync_file_stamp(content_path, &fsize, &mtime)
+               && fsize == s->size && mtime == s->mtime))
+      {
+         s->state = 0;
+         s        = NULL;
+      }
+   }
+
+   if (s)
+   {
+      result = s->state == 2 ? 1 : -1;
+      if (result == 1 && out && len)
+         strlcpy(out, s->id, len);
+      KSYNC_UNLOCK();
+      return result;
+   }
+
+   if (!start || !(job = (ksync_id_job_t*)calloc(1, sizeof(*job))))
+   {
+      KSYNC_UNLOCK();
+      return -1;
+   }
+
+   /* A free slot, else the oldest one that isn't hashing. */
+   for (i = 0; i < KSYNC_ID_SLOTS && !s; i++)
+      if (ksync_ids[i].state == 0)
+         s = &ksync_ids[i];
+   for (i = 0; i < KSYNC_ID_SLOTS && !s; i++)
+   {
+      ksync_id_slot_t *c = &ksync_ids[(ksync_ids_next + i) % KSYNC_ID_SLOTS];
+      if (c->state != 1)
+         s = c;
+   }
+   if (!s)
+   {
+      KSYNC_UNLOCK();
+      free(job);
+      return 0; /* all of them busy - asked again in a second */
+   }
+   ksync_ids_next = (unsigned)(s - ksync_ids + 1) % KSYNC_ID_SLOTS;
+
+   memset(s, 0, sizeof(*s));
+   strlcpy(s->path, content_path, sizeof(s->path));
+   s->pcsx  = pcsx;
+   s->state = 1;
+   s->token = ++ksync_ids_token;
+
+   strlcpy(job->path, content_path, sizeof(job->path));
+   job->pcsx  = pcsx;
+   job->slot  = (int)(s - ksync_ids);
+   job->token = s->token;
+   job->gen   = ksync_gen;
+   KSYNC_UNLOCK();
+
+#ifdef HAVE_THREADS
+   {
+      sthread_t *thread = sthread_create(ksync_id_thread, job);
+      if (thread)
+      {
+         sthread_detach(thread);
+         return 0;
+      }
+   }
+#endif
+   ksync_id_thread(job);
+   return kailleraSyncContentId(content_path, core_path, false, out, len);
+}
+
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path)
 {
    char content_id[KSYNC_FIELD_LEN];
@@ -834,6 +1041,14 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
 
    if (!ok)
    {
+      if (!path_is_valid(content_path))
+      {
+         /* The ISO itself is missing: the match can't even load (the game
+            callback already said which file) - not a memory card problem. */
+         ksync_log("ISO não encontrada (%s): a partida não abre.", content_path);
+         ksync_no_memcard = true;
+         return;
+      }
       ksync_log("Memory Card online: não consegui ler o jogo (%s).", content_path);
       result = -1;
    }
@@ -1779,7 +1994,9 @@ typedef struct
    size_t   pads;         /* pads 1-4: 0 LOCAL, 1 VISITA, FF none (0 = no table: 1P LOCAL, 2P VISITA) */
    /* Team select screen only (the match overwrites them): a pointer per team
       to its name and either a pointer per team to its 3-letter code or the
-      codes themselves, team 0 last, 4 bytes each ending at sel_codes. */
+      codes themselves, team 0 last, 4 bytes each ending at sel_codes (0 =
+      no codes: J.League 2001, whose names are there from the formation
+      screen through the 1st half instead). */
    size_t   sel_names;
    size_t   sel_codes;
    bool     code_ptrs;
@@ -1821,9 +2038,10 @@ typedef struct
       match - this byte is demo_value then; never sent (0 = no such byte). */
    size_t   demo;
    unsigned demo_value;
-   /* WE3: the match's settings - bit 0 extra time, bit 1 golden goal, bit 2
-      penalties - so a tied period's end is known at once (0 = engine
-      without them: WE2002 waits to see what follows). */
+   /* The match's settings - bit 0 extra time, bit 1 golden goal, bit 2
+      penalties (the settings screen's, copied when the match loads; the
+      golden goal turns extra time on with it) - so a tied period's end is
+      known at once (0 = engine without them: wait to see what follows). */
    size_t   settings;
    /* WE2002, WE4 and WE3: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
       on - shots, offsides, fouls, red cards (a second yellow isn't one),
@@ -1840,11 +2058,27 @@ typedef struct
       Shift-JIS) goes as "#" and the number (0 = engine without them). */
    size_t   numbers;
    size_t   numbers_team;
+   /* J.League 2001: the game's own team names by team id, for when the
+      formation screen (the names' only place in the RAM) wasn't opened -
+      a name read from the RAM wins (a patch may rename teams). */
+   const char *const *fixed_names;
+   unsigned fixed_count;
 } ksync_we_map;
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
 #define WE_SET_PENS   4
 #define WE_STATE_OVER 10
+
+/* J.League Jikkyou Winning Eleven 2001's short team names (its formation
+   screen's table at 0x80159F50), by team id. */
+static const char *const ksync_jwe2001_names[] = {
+   "CONSADO", "ANTLERS", "URAWA R", "JEF UTD", "K.REYSO", "FCTOKYO", "VERDY", "F-MARIN",
+   "S-PULSE", "JUBILO", "GRAMPUS", "GAMBA O", "CEREZO", "VISSEL", "SANFREC", "AVISPA",
+   "VEGALTA", "MONTEDI", "HOLLY H", "OM.ARDIJA", "K.FRONT", "YOKOHAM", "S.BELLM", "VENTFORET K",
+   "ALBIREX NI.", "PURPLE", "SAGAN T", "OITA T.", "J1 EAST", "J1 WEST", "J2 EAST", "J2 WEST",
+   "JAP.DREAMS", "WORLD DR.", "MANCHES", "ARSENAL", "MIL", "JUVENTU", "ROM", "BARCELO",
+   "REAL M."
+};
 
 static const ksync_we_map ksync_we_maps[] = {
    { "SLPM_870.56", "WE2002",
@@ -1853,8 +2087,13 @@ static const ksync_we_map ksync_we_maps[] = {
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
-     2, 0xFF, 0, 0, 0, 0,
-     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0 },
+     /* The settings: the settings screen's T.EXTRA / G.OURO / PN (0x8010D460
+        / 64 / 68, words, until the match loads), copied here as the other
+        engines' bits (checked on every combination in the menu). The team
+        ids 6 bytes after go to FF at the match's end, but the settings stay:
+        a rematch (no settings screen) keeps them. */
+     2, 0xFF, 0, 0, 0, 0x72B30,
+     0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, NULL, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -1868,7 +2107,7 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, 0, 0, 0, 0x72FD2,
      /* The RESULT numbers and each player's cards, as WE2002's (the injury
         list not found yet). */
-     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0 },
+     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -1887,7 +2126,47 @@ static const ksync_we_map ksync_we_maps[] = {
         right before the goal records (the injury list not found yet). */
      0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
      /* The shirt numbers, 22 per team. */
-     0x1346DC, 22 },
+     0x1346DC, 22, NULL, 0 },
+   /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
+      the same structures and values, moved, with 26 players per team -
+      extra time (a third of the half) and the shootout too. The team names
+      are short and in English ("ANTLERS"), with no 3-letter codes, and only
+      in the RAM when the formation screen was opened (then through the 1st
+      half) - the game's own list otherwise. The settings are WE3/WE4's
+      bits (checked by changing the menu's and seeing the match copy
+      them), in a settings block set at the match's load, the team ids 4
+      bytes after them - as WE2000's. Its injury records' 3rd byte went to
+      1 on a player hurt earlier when another one got hurt (meaning
+      unknown - ignored, as WE2002's). Not seen yet: a golden goal, the
+      shootout's state byte (WE2002's 0x7571C - not used: the referee's
+      state ends it). */
+   { "SLPM_868.35", "JWE2001",
+     { { 0x1701C, { 0x80, 0x2E, 0x03, 0x3C, 0x80, 0x80, 0x63, 0x34, 0x18, 0x00, 0x02, 0x3C, 0xFF, 0x80, 0x42, 0x34 } },
+       { 0x1D038, { 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00, 0x21, 0x10, 0x45, 0x00, 0x80, 0x10, 0x02, 0x00 } } },
+     false, 0x70F9C, 0x70F9E, 0x713A4, 0, 0x7114C,
+     { 0x71008, 0x71088 }, 4, { 0x60D40, 0x60EE0 }, 0, 26, 16, 0x71325,
+     0x159F50, 0, false, false, false, false, 0,
+     0x71158, 0x71156, 0, 0x772C9, 0x76F21, 0x711CE,
+     2, 0xFF, 0, 0, 0, 0x6F288,
+     0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0,
+     ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]) },
+   /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
+      WE2002's engine two years earlier: the same structures and values,
+      moved, with 22 players per team, and the team select screen's names
+      and 3-letter codes as WE2002's. The settings are WE3/WE4's bits
+      (extra time, golden goal, penalties - checked by changing the menu's
+      and seeing the match copy them), next to the team ids of a settings
+      block set at the match's load. Not seen yet: a golden goal, the
+      shootout's state byte (not used: the referee's state ends it). */
+   { "SLPM_866.00", "WE2000",
+     { { 0x1701C, { 0x03, 0x00, 0x60, 0x16, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x12, 0x21, 0x20, 0xC0, 0x02 } },
+       { 0x1D038, { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA2, 0x93, 0x08, 0x00, 0xBD, 0x27, 0x08, 0x00, 0xE0, 0x03 } } },
+     false, 0x750AC, 0x750AE, 0x75460, 0, 0x75244,
+     { 0x75108, 0x75188 }, 4, { 0x64518, 0x64678 }, 0, 22, 16, 0x7541D,
+     0xBD590, 0x7FAA0, false, false, false, false, 0,
+     0x75250, 0x7524E, 0, 0x7B385, 0x7AFDD, 0x752C6,
+     2, 0xFF, 0, 0, 0, 0x72A90,
+     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -1976,8 +2255,10 @@ static void ksync_live_reset(void)
 #define KSYNC_LIVE_PEN_FRAMES 90
 /* WE2002's shootout: its state at a miss's value this long, score decided = over (20 s). */
 #define KSYNC_LIVE_SHOOTOUT_IDLE 1200
-/* WE2002: a tied 2nd half / extra time the referee ended - extra time or the
-   shootout starts within ~13 s; none this long (25 s) = the match ends a draw. */
+/* An engine without the settings in RAM (none now - WE2002 had none until
+   2026-11-17): a tied 2nd half / extra time the referee ended - extra time
+   or the shootout starts within ~13 s; none this long (25 s) = the match
+   ends a draw. Players closing the game sooner left a draw "abandoned". */
 #define KSYNC_LIVE_DRAW_FRAMES 1500
 /* After the kickoff whistle, 5 s (real time) before the match goes to WE
    Camp - leaving it before that (Start, wrong kits) doesn't count. */
@@ -2152,9 +2433,10 @@ static size_t ksync_live_ptr(const uint8_t *ram, size_t addr)
    return ptr >= 0x80000000u && ptr < 0x80000000u + WE_RAM_SIZE ? ptr & 0x1FFFFF : 0;
 }
 
-/* While the team select screen is up: every team's name and code, kept for
-   the match (which overwrites them). Taken only when the whole table reads
-   as one - from team 0 on, past both teams picked now. */
+/* While the team select screen is up (J.League 2001: the formation screen,
+   before the kickoff): every team's name and code, kept for the match
+   (which overwrites them). Taken only when the whole table reads as one -
+   from team 0 on, past both teams picked now. */
 static void ksync_live_capture_names(const uint8_t *ram, const uint8_t *st,
       const ksync_we_map *map)
 {
@@ -2166,13 +2448,17 @@ static void ksync_live_capture_names(const uint8_t *ram, const uint8_t *st,
    for (id = 0; id < WE_TEAMS; id++)
    {
       size_t name = ksync_live_ptr(ram, map->sel_names + 4 * id);
-      size_t code = map->code_ptrs ? ksync_live_ptr(ram, map->sel_codes + 4 * id)
+      size_t code = !map->sel_codes ? 0
+                  : map->code_ptrs ? ksync_live_ptr(ram, map->sel_codes + 4 * id)
                   : map->sel_codes - 4 * id;
-      if (!name || !code || (!map->code_ptrs && ram[code + 3] != 0))
+      if (!name || (map->sel_codes && (!code || (!map->code_ptrs && ram[code + 3] != 0))))
          break;
       ksync_live_name(ram, name, 24, names[id], sizeof(names[id]));
-      ksync_live_name(ram, code, 4, codes[id], sizeof(codes[id]));
-      if (!ksync_live_plain(names[id], sizeof(names[id]), map->mixed_case) || strlen(codes[id]) != 3)
+      codes[id][0] = '\0';
+      if (map->sel_codes)
+         ksync_live_name(ram, code, 4, codes[id], sizeof(codes[id]));
+      if (!ksync_live_plain(names[id], sizeof(names[id]), map->mixed_case)
+            || (map->sel_codes && strlen(codes[id]) != 3))
          break;
       count++;
    }
@@ -2380,11 +2666,14 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
       const uint8_t *goals = ram + map->goals[side];
       unsigned team        = ksync_live_team(st, map, side);
       bool known           = ksync_live.have_names && team < WE_TEAMS;
+      const char *name     = known ? ksync_live.names[team] : "";
 
+      /* No name read from the RAM: the game's own (map->fixed_names). */
+      if (!*name && map->fixed_names && team < map->fixed_count)
+         name = map->fixed_names[team];
       n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\","
             "\"goals\":%u,\"scorers\":[", side ? "," : "", team,
-            known ? ksync_live.names[team] : "", known ? ksync_live.codes[team] : "",
-            st[map->score + side]);
+            name, known ? ksync_live.codes[team] : "", st[map->score + side]);
       for (i = 0; i < 32 && goals[gs * i + 2] != 0xFF && n > 0 && (size_t)n < cap; i++)
       {
          char scorer[20], assist[20];
@@ -2635,14 +2924,17 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    /* The referee ended the period (map->state). The 2nd half or extra time
       with a winner, a golden goal (extra time's clock still running) or the
       decided shootout - the end; tied, extra time or the shootout follow
-      (the phase goes up) or it's a draw: WE3 knows which from its settings,
-      WE2002 sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
+      (the phase goes up) or it's a draw: the settings say which, at the
+      whistle (extra time after the 2nd half, the shootout after either -
+      neither on = a draw, sent at once, so players closing the game right
+      after the whistle don't leave it "abandoned"); an engine without them
+      sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
       Every engine also shows the state between the halves with the next
       period already set (its clock at 0, or set for a few frames - WE2002
       for 1-2 frames, a sample landing there was a false end at half time):
       a period's end has its clock run to 0 in that period, a golden goal
-      the clock run (below the half's) with the setting on - WE2002, with
-      no settings in RAM: in either half of extra time. */
+      the clock run (below the half's) with the setting on - without
+      settings in RAM: in either half of extra time. */
    if (ksync_live.active && clock > 0)
       ksync_live.run_phase = phase + 1;
    set     = map->settings ? ram[map->settings] : 0;
@@ -2718,6 +3010,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.decided = map->phase
          && ((phase == 4 && ksync_live_b(ram, st, map->pens) != ksync_live_b(ram, st, map->pens + 1))
             || ((phase == 2 || phase == 3) && ksync_live.gg_clock > 1 /* clock running */
+               && (!map->settings || (set & WE_SET_GOLDEN))
                && st[map->score] != st[map->score + 1])
             || (map->state && state == WE_STATE_OVER && (phase == 4 || time_up || golden)));
    ksync_live.prev_phase    = phase;

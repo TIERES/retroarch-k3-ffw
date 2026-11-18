@@ -30,6 +30,7 @@ static pthread_t threadk;
 #include <commdlg.h> /* GetOpenFileNameA - kailleraFindOrBrowseGame()'s manual-pick fallback */
 #include "file/file_path.h" /* path_is_valid/fill_pathname_basedir - same fallback's folder search */
 #include "core_info.h" /* core_info_get_list - same fallback's core lookup */
+#include <encodings/utf.h> /* utf8_to_utf16_string_alloc - KailleraMessageBox() with accents */
 
  
 bool kailleraInitialised;
@@ -53,6 +54,13 @@ char kailleraRomNames[MAX_GAMES * 128];
 char filePathK[MAX_GAMES][512];
 char corePaths[MAX_GAMES][512];
 char* kailleraGames;
+/* Content-history entries whose file no longer exists (ISO deleted, moved or
+   renamed): left out of the Kaillera list - no room can be created with them -
+   but kept here so joining a room of that game says where the file was
+   (kailleraFindOrBrowseGame()). */
+static int missingGames;
+static char missingNames[MAX_GAMES][128];
+static char missingPaths[MAX_GAMES][512];
 
 #if !defined(N02_WIN32) && !defined(N02_LINUX)
 extern int (WINAPI* kailleraIsPlaybackModeF)();
@@ -115,13 +123,24 @@ static int WINAPI kailleraGameCallback(char* game, int player, int numPlayers)
 
    fname = kailleraRomNames;
 
+   bool listed = false;
    for (int i = 0; i < totalGames; i++) {
       if (strncmp(fname, game, strlen(fname)) == 0) {
          fname = filePathK[i];
          cpath = corePaths[i];
+         listed = true;
          break;
       }
       fname += strlen(fname) + 1;
+   }
+   /* The file vanished after the room was joined (the list and the join check
+      only see it when the Kaillera window opens): RetroArch can't load it -
+      say which file, instead of only "could not read the content". */
+   if (listed && !path_is_valid(fname)) {
+      char msg[640];
+      snprintf(msg, sizeof(msg), "ISO não encontrada: %s - coloque o arquivo de volta ou abra o jogo pelo "
+            "\"Carregar conteúdo\" e entre na sala de novo.", fname);
+      runloop_msg_queue_push(msg, 2, 900, true, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
    }
 
    kailleraInitialisedInternal = 1;
@@ -215,7 +234,11 @@ static void WINAPI kailleraChatReceivedCallback(char* nick, char* text)
       snprintf(new_msg, sizeof(new_msg), "%s: %s", nick, text);
 
    if (strlen(new_msg) > 0) {
-      runloop_msg_queue_push(new_msg, 0, 5 * 60, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+      /* The DLL's own notices (nick "WE Camp" - the game's WE Camp accounts,
+         "joguem ate o fim") stay 15 s, long enough to read them all (Walter,
+         2026-11-18); players' chat 5 s. */
+      unsigned frames = (nick && strcmp(nick, "WE Camp") == 0) ? 15 * 60 : 5 * 60;
+      runloop_msg_queue_push(new_msg, 0, frames, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
    }
 }
 
@@ -464,6 +487,10 @@ int (WINAPI* kailleraWatchGoLiveLockedF)();
 int (WINAPI* kailleraStreamCheckStateRequestedF)();
 void (WINAPI* kailleraStreamUploadStateF)(int frameIndex, const void* data, int size);
 
+/* The room's ISO check - optional, same convention: a DLL that has it gets
+   kailleraContentIdForGame() (below) right after kailleraSetInfos(). */
+void (WINAPI* kailleraSetContentIdCallbackF)(int (WINAPI* callback)(const char* game, int start, char* out, int cap));
+
 
 
 void CloseKaillera() {
@@ -514,6 +541,7 @@ void CloseKaillera() {
    kailleraWatchGoLiveLockedF              = NULL;
    kailleraStreamCheckStateRequestedF      = NULL;
    kailleraStreamUploadStateF              = NULL;
+   kailleraSetContentIdCallbackF           = NULL;
 
    if (kailleraDLL)
       FreeLibrary(kailleraDLL);
@@ -697,6 +725,27 @@ static bool KailleraFindCoreForLabel(const char* label, char* out, size_t cap) {
 // against). Returns 1 if a file was found/picked (join may proceed), 0 if
 // the user cancelled the picker (caller should show its own "not in your
 // list" error).
+/* MessageBox with the text in UTF-8 (this file's encoding: accents and the
+   file names from the content history), over the RetroArch window. */
+static int KailleraMessageBox(const char* text, UINT flags) {
+   wchar_t* wtext = utf8_to_utf16_string_alloc(text);
+   int answer;
+   if (wtext == NULL)
+      return MessageBoxA(win32_get_window(), text, "Kaillera", flags);
+   answer = MessageBoxW(win32_get_window(), wtext, L"Kaillera", flags);
+   free(wtext);
+   return answer;
+}
+
+/* Where the content history had this game before its file vanished, or NULL. */
+static const char* KailleraMissingPath(const char* wantedGame) {
+   int i;
+   for (i = 0; i < missingGames; i++)
+      if (strcmp(missingNames[i], wantedGame) == 0)
+         return missingPaths[i];
+   return NULL;
+}
+
 static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
    const char* sep = strstr(wantedGame, ": ");
    const char* wantedFilename = sep ? sep + 2 : wantedGame;
@@ -717,12 +766,11 @@ static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
 
    if (!KailleraFindCoreForLabel(label, corePath, sizeof(corePath))) {
       char msg[400];
-      _snprintf(msg, sizeof(msg),
-            "Esta sala usa o nucleo \"%s\", que nao foi encontrado neste RetroArch.\n\n"
-            "Instale esse nucleo (Menu principal > Atualizador online > Baixar nucleo) "
+      snprintf(msg, sizeof(msg),
+            "Esta sala usa o núcleo \"%s\", que não foi encontrado neste RetroArch.\n\n"
+            "Instale esse núcleo (Menu principal > Atualizador online > Baixar núcleo) "
             "e tente entrar de novo.", label[0] ? label : wantedGame);
-      msg[sizeof(msg) - 1] = '\0';
-      MessageBoxA(win32_get_window(), msg, "Kaillera", MB_OK | MB_ICONWARNING);
+      KailleraMessageBox(msg, MB_OK | MB_ICONWARNING);
       return 0; /* caller shows its own "not in your list" line too */
    }
 
@@ -735,11 +783,54 @@ static int WINAPI kailleraFindOrBrowseGame(char* wantedGame) {
          found = true;
    }
 
-   if (!found && !BrowseForGameFile(wantedFilename, candidate, sizeof(candidate)))
-      return 0; /* user cancelled - caller shows its own error */
+   if (!found) {
+      /* Before the file picker: say what is missing (and, for a game the
+         content history had, where its file was) - the room is only joined
+         with the file in hand, never to be dropped at Start. */
+      const char* was = KailleraMissingPath(wantedGame);
+      char msg[1400];
+      if (was != NULL)
+         snprintf(msg, sizeof(msg),
+               "A ISO do jogo desta sala não foi encontrada no seu PC:\n\n%s\n\n"
+               "Ela estava em:\n%s\n\n"
+               "O arquivo foi apagado, movido ou renomeado. Coloque a ISO de volta nessa pasta, "
+               "ou clique em OK para escolher onde ela está agora.\n\n"
+               "Use o mesmo arquivo dos outros jogadores da sala.", wantedFilename, was);
+      else
+         snprintf(msg, sizeof(msg),
+               "O jogo desta sala não está na sua lista do RetroArch:\n\n%s\n\n"
+               "Clique em OK para escolher o arquivo da ISO no seu PC.\n\n"
+               "Use o mesmo arquivo dos outros jogadores da sala.", wantedFilename);
+      if (KailleraMessageBox(msg, MB_OKCANCEL | MB_ICONWARNING) != IDOK)
+         return 0; /* caller shows its own error */
+      if (!BrowseForGameFile(wantedFilename, candidate, sizeof(candidate)))
+         return 0; /* user cancelled - caller shows its own error */
+   }
 
    AppendGameEntry(wantedGame, candidate, corePath);
    return 1;
+}
+
+// The room's ISO check, before Start (kailleraclient.dll's kaillera_ui.cpp,
+// registered with kailleraSetContentIdCallback() below): "CRC32:SIZE" of a
+// game in our list - the file nGameLoad() opens for that name, hashed the way
+// kaillera_sync.c's fingerprint does at game start. The DLL asks from its
+// window's thread as the player enters a room (start = 1) and then once a
+// second (start = 0) - it never blocks: 1 = `out` has the id, 0 = still
+// hashing, -1 = not in the list or unreadable.
+static int WINAPI kailleraContentIdForGame(const char* game, int start, char* out, int cap) {
+   const char* p = kailleraRomNames;
+   int i;
+
+   if (game == NULL || out == NULL || cap <= 0)
+      return -1;
+   out[0] = '\0';
+   for (i = 0; i < totalGames; i++) {
+      if (strncmp(p, game, strlen(p)) == 0) /* nGameLoad()'s own match */
+         return kailleraSyncContentId(filePathK[i], corePaths[i], start != 0, out, (size_t)cap);
+      p += strlen(p) + 1;
+   }
+   return -1;
 }
 
 static int InitialiseKaillera() {
@@ -754,6 +845,9 @@ static int InitialiseKaillera() {
    kInfos.findOrBrowseGameCallback = kailleraFindOrBrowseGame;
    kailleraInitF();
    kailleraSetInfosF(&kInfos);
+   /* A DLL with the room's ISO check learns how to get a game's id. */
+   if (kailleraSetContentIdCallbackF != NULL)
+      kailleraSetContentIdCallbackF(kailleraContentIdForGame);
    KailleraHandle = CreateThread(NULL, 0, kailleraThread, NULL, 0, 0);
 
    kailleraInitialised = true;
@@ -809,6 +903,7 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchGoLiveLocked");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraStreamCheckStateRequested");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadState");
+      kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "kailleraSetContentIdCallback");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
       kailleraInitF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraInit@0");
@@ -848,6 +943,7 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchGoLiveLocked@0");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraStreamCheckStateRequested@0");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadState@12");
+      kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "_kailleraSetContentIdCallback@4");
 #endif
 
       if (kailleraGetVersionF != NULL &&
@@ -2659,12 +2755,16 @@ void AddGamesToList() {
    memset(filePathK, 0, sizeof(filePathK));
    memset(corePaths, 0, sizeof(corePaths));
    totalGames = 0;
+   missingGames = 0;
 
    for (int i = 0; i < playlist_size(g_defaults.content_history) && i < MAX_GAMES; i++) {
       playlist_get_index(g_defaults.content_history, i, &entry);
       if (entry->path != NULL && entry->core_name != NULL && entry->core_path != NULL) {
-         strlcpy(filePathK[totalGames], entry->path, sizeof(filePathK[totalGames]));
-         strlcpy(corePaths[totalGames], entry->core_path, sizeof(corePaths[totalGames]));
+         bool exists = path_is_valid(entry->path);
+         if (exists) {
+            strlcpy(filePathK[totalGames], entry->path, sizeof(filePathK[totalGames]));
+            strlcpy(corePaths[totalGames], entry->core_path, sizeof(corePaths[totalGames]));
+         }
          strcpy(path, entry->path);
          strcpy(cn, entry->core_name);
          ch = strtok(path, PATHSEPARATOR);
@@ -2681,6 +2781,16 @@ void AddGamesToList() {
          strcat(gname, ": ");
          strcat(gname, temp);
          gname[127] = 0;
+         if (!exists) {
+            /* The ISO isn't there anymore: not in the list (creating a room
+               with it would drop the player at Start), only remembered. */
+            if (missingGames < MAX_GAMES) {
+               strlcpy(missingNames[missingGames], gname, sizeof(missingNames[missingGames]));
+               strlcpy(missingPaths[missingGames], entry->path, sizeof(missingPaths[missingGames]));
+               missingGames++;
+            }
+            continue;
+         }
 #if defined(N02_WIN32) || defined(N02_LINUX)
          client.games.add(gname, MAX_INPUTS);
 #endif
