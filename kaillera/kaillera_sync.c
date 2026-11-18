@@ -2038,9 +2038,10 @@ typedef struct
       match - this byte is demo_value then; never sent (0 = no such byte). */
    size_t   demo;
    unsigned demo_value;
-   /* WE3: the match's settings - bit 0 extra time, bit 1 golden goal, bit 2
-      penalties - so a tied period's end is known at once (0 = engine
-      without them: WE2002 waits to see what follows). */
+   /* The match's settings - bit 0 extra time, bit 1 golden goal, bit 2
+      penalties (the settings screen's, copied when the match loads; the
+      golden goal turns extra time on with it) - so a tied period's end is
+      known at once (0 = engine without them: wait to see what follows). */
    size_t   settings;
    /* WE2002, WE4 and WE3: the RESULT screen's numbers, LOCAL/VISITA byte pairs from here
       on - shots, offsides, fouls, red cards (a second yellow isn't one),
@@ -2086,7 +2087,12 @@ static const ksync_we_map ksync_we_maps[] = {
      false, 0x75564, 0x75566, 0x7591C, 0, 0x75702,
      { 0x755C4, 0x75644 }, 4, { 0x64570, 0x646E0 }, 0, 23, 16, 0x758D9,
      0xBF0E8, 0x800DC, false, false, false, false, 0, 0x7570E, 0x7570C, 0x7571C, 0x7B841, 0x7B499, 0x75782,
-     2, 0xFF, 0, 0, 0, 0,
+     /* The settings: the settings screen's T.EXTRA / G.OURO / PN (0x8010D460
+        / 64 / 68, words, until the match loads), copied here as the other
+        engines' bits (checked on every combination in the menu). The team
+        ids 6 bytes after go to FF at the match's end, but the settings stay:
+        a rematch (no settings screen) keeps them. */
+     2, 0xFF, 0, 0, 0, 0x72B30,
      0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, NULL, 0 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
@@ -2249,8 +2255,10 @@ static void ksync_live_reset(void)
 #define KSYNC_LIVE_PEN_FRAMES 90
 /* WE2002's shootout: its state at a miss's value this long, score decided = over (20 s). */
 #define KSYNC_LIVE_SHOOTOUT_IDLE 1200
-/* WE2002: a tied 2nd half / extra time the referee ended - extra time or the
-   shootout starts within ~13 s; none this long (25 s) = the match ends a draw. */
+/* An engine without the settings in RAM (none now - WE2002 had none until
+   2026-11-17): a tied 2nd half / extra time the referee ended - extra time
+   or the shootout starts within ~13 s; none this long (25 s) = the match
+   ends a draw. Players closing the game sooner left a draw "abandoned". */
 #define KSYNC_LIVE_DRAW_FRAMES 1500
 /* After the kickoff whistle, 5 s (real time) before the match goes to WE
    Camp - leaving it before that (Start, wrong kits) doesn't count. */
@@ -2916,14 +2924,17 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    /* The referee ended the period (map->state). The 2nd half or extra time
       with a winner, a golden goal (extra time's clock still running) or the
       decided shootout - the end; tied, extra time or the shootout follow
-      (the phase goes up) or it's a draw: WE3 knows which from its settings,
-      WE2002 sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
+      (the phase goes up) or it's a draw: the settings say which, at the
+      whistle (extra time after the 2nd half, the shootout after either -
+      neither on = a draw, sent at once, so players closing the game right
+      after the whistle don't leave it "abandoned"); an engine without them
+      sees nothing follow for KSYNC_LIVE_DRAW_FRAMES.
       Every engine also shows the state between the halves with the next
       period already set (its clock at 0, or set for a few frames - WE2002
       for 1-2 frames, a sample landing there was a false end at half time):
       a period's end has its clock run to 0 in that period, a golden goal
-      the clock run (below the half's) with the setting on - WE2002, with
-      no settings in RAM: in either half of extra time. */
+      the clock run (below the half's) with the setting on - without
+      settings in RAM: in either half of extra time. */
    if (ksync_live.active && clock > 0)
       ksync_live.run_phase = phase + 1;
    set     = map->settings ? ram[map->settings] : 0;
@@ -2999,6 +3010,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.decided = map->phase
          && ((phase == 4 && ksync_live_b(ram, st, map->pens) != ksync_live_b(ram, st, map->pens + 1))
             || ((phase == 2 || phase == 3) && ksync_live.gg_clock > 1 /* clock running */
+               && (!map->settings || (set & WE_SET_GOLDEN))
                && st[map->score] != st[map->score + 1])
             || (map->state && state == WE_STATE_OVER && (phase == 4 || time_up || golden)));
    ksync_live.prev_phase    = phase;
