@@ -1012,6 +1012,7 @@ static bool s_bc_has_stop;
 static unsigned s_bc_checkpoint;
 static bool s_bc_checkpoint_tried;
 static bool kailleraBroadcasterLoadCheckpoint(unsigned card);
+static void kailleraBroadcasterCardsReady(const char *dir, unsigned empty_slots);
 
 static void PlaybackSetFastForward(bool on);
 
@@ -1110,6 +1111,10 @@ void kailleraBroadcasterStartIfRequested(void) {
          if (GetEnvironmentVariableA("WECAMP_BROADCAST_CHECKPOINT", v, sizeof(v)))
             s_bc_checkpoint = (unsigned)strtoul(v, NULL, 10);
       }
+      /* The memory cards the card's savestate was taken with, before the
+         core loads the Watch Live's ones. */
+      if (s_bc_checkpoint)
+         kailleraSyncMemcardsReadyHook = kailleraBroadcasterCardsReady;
       if (!GetEnvironmentVariableA("WECAMP_CONTROL_FILE", s_bc_control, sizeof(s_bc_control)))
          s_bc_control[0] = '\0';
       RARCH_LOG("[WE Camp]: broadcaster starting Watch Live session %s (%s), stream from frame %u (card savestate %u)\n",
@@ -1400,60 +1405,6 @@ static void WatchStateTrailerApply(const void *src) {
    kaillera_swap_cntr = t.swap_cntr;
 }
 
-/* The WE Camp broadcaster's start (WECAMP_BROADCAST_CHECKPOINT): the
-   savestate of the card's start the host's PC uploaded
-   (kailleraWatchServiceCheckpoint()), applied like "Ir ao vivo!"'s
-   (WatchGoLiveApply()) - then the frame counter goes on in the host's
-   numbering, the one of the stop frame the site sends (the next frame run
-   is the host's frame_index, the first one the state hasn't applied).
-   Blocking (a few MB, before anything is streamed); false = fast-forward. */
-static bool kailleraBroadcasterLoadCheckpoint(unsigned card) {
-#ifdef _WIN32
-   size_t state_size = core_serialize_size();
-   size_t cap        = state_size + sizeof(watch_state_trailer_t);
-   int n = -1, frame_index = 0, byte_offset = 0, tries;
-   retro_ctx_serialize_info_t info;
-   void *buf;
-
-   if (kailleraWatchDownloadCheckpointF == NULL || state_size == 0) {
-      RARCH_ERR("[WE Camp]: no card savestate support (DLL or core) - fast-forwarding\n");
-      return false;
-   }
-   buf = malloc(cap);
-   if (buf == NULL)
-      return false;
-   for (tries = 0; tries < 3 && n < 0; tries++) {
-      if (tries)
-         Sleep(2000);
-      n = kailleraWatchDownloadCheckpointF((int)card, buf, (int)cap, &frame_index, &byte_offset);
-   }
-   /* state_size alone = a host build older than watch_state_trailer_t */
-   if ((n != (int)state_size && n != (int)cap) || frame_index <= 0) {
-      RARCH_ERR("[WE Camp]: card %u savestate not available (%d bytes) - fast-forwarding\n", card, n);
-      free(buf);
-      return false;
-   }
-   info.data_const = buf;
-   info.data       = NULL;
-   info.size       = state_size;
-   if (!core_unserialize(&info)) {
-      RARCH_ERR("[WE Camp]: card %u savestate did not load - fast-forwarding\n", card);
-      free(buf);
-      return false;
-   }
-   if (n == (int)cap)
-      WatchStateTrailerApply((const char*)buf + state_size);
-   free(buf);
-   kailleraWatchJumpToLive(frame_index, byte_offset);
-   current_core_frame = (unsigned)frame_index - 1; /* core_run() counts it up before the frame */
-   RARCH_LOG("[WE Camp]: started from card %u's savestate (host frame %d, stream offset %d)\n",
-         card, frame_index, byte_offset);
-   return true;
-#else
-   (void)card;
-   return false;
-#endif
-}
 #endif
 
 /* "Ir direto para o Ao Vivo!" - host-side half, called from
@@ -1583,6 +1534,152 @@ void kailleraWatchServiceCheckpoint(void) {
       }
    }
    free(state_buf);
+#endif
+}
+
+/* The WE Camp broadcaster's start (WECAMP_BROADCAST_CHECKPOINT): the
+   savestate of the card's start the host's PC uploaded
+   (kailleraWatchServiceCheckpoint() above) - downloaded once, when the
+   Watch Live's memory cards are being prepared (its cards go in first) or
+   at the session's first frame. */
+static char *s_bc_ckpt_buf;
+static int   s_bc_ckpt_n = -1, s_bc_ckpt_frame, s_bc_ckpt_offset;
+static bool  s_bc_ckpt_fetched;
+
+static bool kailleraBroadcasterFetchCheckpoint(void) {
+#ifdef _WIN32
+   size_t state_size = core_serialize_size();
+   size_t cap;
+   int tries;
+
+   if (s_bc_ckpt_fetched)
+      return s_bc_ckpt_n > 0;
+   s_bc_ckpt_fetched = true;
+   if (kailleraWatchDownloadCheckpointF == NULL) {
+      RARCH_ERR("[WE Camp]: no card savestate support in the DLL - fast-forwarding\n");
+      return false;
+   }
+   /* The core may not be loaded yet (the cards come before it): room for
+      any PCSX-ReARMed state, as the server takes. */
+   cap = (state_size ? state_size : 16 * 1024 * 1024) + sizeof(watch_state_trailer_t)
+       + 8 + 2 * KAILLERA_CARD_SIZE;
+   if ((s_bc_ckpt_buf = (char*)malloc(cap)) == NULL)
+      return false;
+   for (tries = 0; tries < 3 && s_bc_ckpt_n < 0; tries++) {
+      if (tries)
+         Sleep(2000);
+      s_bc_ckpt_n = kailleraWatchDownloadCheckpointF((int)s_bc_checkpoint, s_bc_ckpt_buf, (int)cap,
+            &s_bc_ckpt_frame, &s_bc_ckpt_offset);
+   }
+   if (s_bc_ckpt_n <= 0 || s_bc_ckpt_frame <= 0) {
+      RARCH_ERR("[WE Camp]: card %u savestate not available - fast-forwarding\n", s_bc_checkpoint);
+      s_bc_ckpt_n = -1;
+      return false;
+   }
+   return true;
+#else
+   return false;
+#endif
+}
+
+/* The cards block after the state + trailer (kailleraCheckpointCards()):
+   where slot `s`'s card is in the buffer, or NULL. */
+static const char *kailleraBroadcasterCheckpointCard(size_t state_size, int s) {
+   size_t at = state_size + sizeof(watch_state_trailer_t);
+   uint32_t magic, slots;
+   int i;
+
+   if (s_bc_ckpt_n < 0 || (size_t)s_bc_ckpt_n < at + 8)
+      return NULL;
+   memcpy(&magic, s_bc_ckpt_buf + at, 4);
+   memcpy(&slots, s_bc_ckpt_buf + at + 4, 4);
+   if (magic != KAILLERA_CARDS_MAGIC || !(slots & (1u << s)))
+      return NULL;
+   at += 8;
+   for (i = 0; i < s; i++)
+      if (slots & (1u << i))
+         at += KAILLERA_CARD_SIZE;
+   return at + KAILLERA_CARD_SIZE <= (size_t)s_bc_ckpt_n ? s_bc_ckpt_buf + at : NULL;
+}
+
+/* kailleraSyncMemcardsReadyHook: the Watch Live's cards (its marker's
+   versions) are in `dir` - the savestate's go over them. The state's size
+   isn't known yet (the core isn't loaded): found from the end of the
+   buffer, the cards block being the last thing in it. */
+static void kailleraBroadcasterCardsReady(const char *dir, unsigned empty_slots) {
+#ifdef _WIN32
+   size_t state_size = 0;
+   int s, cards, written = 0;
+
+   if (!kailleraBroadcasterFetchCheckpoint())
+      return;
+   /* The block of 2 cards, or of 1, at the end of the buffer. */
+   for (cards = 2; cards >= 1 && !state_size; cards--) {
+      size_t block = 8 + (size_t)cards * KAILLERA_CARD_SIZE;
+      uint32_t magic, slots;
+      if ((size_t)s_bc_ckpt_n < block + sizeof(watch_state_trailer_t))
+         continue;
+      memcpy(&magic, s_bc_ckpt_buf + s_bc_ckpt_n - block, 4);
+      memcpy(&slots, s_bc_ckpt_buf + s_bc_ckpt_n - block + 4, 4);
+      if (magic == KAILLERA_CARDS_MAGIC && ((slots & 1) ? 1 : 0) + ((slots & 2) ? 1 : 0) == cards)
+         state_size = s_bc_ckpt_n - block - sizeof(watch_state_trailer_t);
+   }
+   for (s = 0; s < 2 && state_size; s++) {
+      const char *data = kailleraBroadcasterCheckpointCard(state_size, s);
+      char path[PATH_MAX_LENGTH];
+      FILE *f;
+      if (data == NULL || (empty_slots & (1u << s)))
+         continue;
+      snprintf(path, sizeof(path), "%s\\pcsx-card%d.mcd", dir, s + 1);
+      if ((f = fopen(path, "wb")) != NULL) {
+         if (fwrite(data, 1, KAILLERA_CARD_SIZE, f) == KAILLERA_CARD_SIZE)
+            written++;
+         fclose(f);
+      }
+   }
+   RARCH_LOG("[WE Camp]: card %u savestate fetched (%d bytes): %d memory card(s) from it\n",
+         s_bc_checkpoint, s_bc_ckpt_n, written);
+#else
+   (void)dir; (void)empty_slots;
+#endif
+}
+
+/* Applied like "Ir ao vivo!"'s (WatchGoLiveApply()) - then the frame
+   counter goes on in the host's numbering, the one of the stop frame the
+   site sends (the next frame run is the host's frame_index, the first one
+   the state hasn't applied). false = fast-forward instead. */
+static bool kailleraBroadcasterLoadCheckpoint(unsigned card) {
+#ifdef _WIN32
+   size_t state_size = core_serialize_size();
+   retro_ctx_serialize_info_t info;
+
+   if (state_size == 0 || !kailleraBroadcasterFetchCheckpoint())
+      return false;
+   /* state_size alone = a host build older than watch_state_trailer_t */
+   if ((size_t)s_bc_ckpt_n < state_size) {
+      RARCH_ERR("[WE Camp]: card %u savestate too short (%d bytes) - fast-forwarding\n", card, s_bc_ckpt_n);
+      return false;
+   }
+   info.data_const = s_bc_ckpt_buf;
+   info.data       = NULL;
+   info.size       = state_size;
+   if (!core_unserialize(&info)) {
+      RARCH_ERR("[WE Camp]: card %u savestate did not load - fast-forwarding\n", card);
+      return false;
+   }
+   if ((size_t)s_bc_ckpt_n >= state_size + sizeof(watch_state_trailer_t))
+      WatchStateTrailerApply(s_bc_ckpt_buf + state_size);
+   kailleraWatchJumpToLive(s_bc_ckpt_frame, s_bc_ckpt_offset);
+   current_core_frame = (unsigned)s_bc_ckpt_frame - 1; /* core_run() counts it up before the frame */
+   RARCH_LOG("[WE Camp]: started from card %u's savestate (host frame %d, stream offset %d)\n",
+         card, s_bc_ckpt_frame, s_bc_ckpt_offset);
+   free(s_bc_ckpt_buf);
+   s_bc_ckpt_buf = NULL;
+   s_bc_ckpt_n   = -1;
+   return true;
+#else
+   (void)card;
+   return false;
 #endif
 }
 
