@@ -58,6 +58,13 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
    played with no memory card. No-op for every other room/core. */
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path);
 
+/* The WE Camp broadcaster (feature/wecamp-broadcaster): called by
+   kailleraSyncPrepareMemcards() once a Watch Live's cards (the versions its
+   marker names) are in `dir` as pcsx-card1.mcd / pcsx-card2.mcd, right before
+   the core loads them - it may write over them the cards the savestate it
+   starts from was taken with. NULL = nothing (players, replays). */
+extern void (*kailleraSyncMemcardsReadyHook)(const char *dir, unsigned empty_slots);
+
 /* The Kaillera room's ISO check, before Start (kaillera.c's
    kailleraContentIdForGame(), asked by the DLL from its window's thread):
    "CRC32:SIZE" of a game's content - the same value the fingerprint sends at

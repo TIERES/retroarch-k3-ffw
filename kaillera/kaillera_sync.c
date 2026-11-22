@@ -1004,6 +1004,8 @@ int kailleraSyncContentId(const char *content_path, const char *core_path,
    return kailleraSyncContentId(content_path, core_path, false, out, len);
 }
 
+void (*kailleraSyncMemcardsReadyHook)(const char *dir, unsigned empty_slots);
+
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path)
 {
    char content_id[KSYNC_FIELD_LEN];
@@ -1078,6 +1080,8 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
             content_id, ksync_mc_dir,
             (ksync_mc_empty_slots & 1) ? "vazio" : "cartão",
             (ksync_mc_empty_slots & 2) ? "vazio" : "cartão");
+      if (ksync_playback && kailleraSyncMemcardsReadyHook)
+         kailleraSyncMemcardsReadyHook(ksync_mc_dir, ksync_mc_empty_slots);
       return;
    }
 
