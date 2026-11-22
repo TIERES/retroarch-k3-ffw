@@ -1004,6 +1004,15 @@ static char s_bc_control[MAX_PATH];
 static unsigned s_bc_stop_frame;
 static bool s_bc_has_stop;
 
+/* WECAMP_BROADCAST_CHECKPOINT: the WE Camp card's start (its frame - the
+   match's settings screen, a Repeat or the kickoff) whose savestate the host's
+   PC uploaded: loaded at the session's first frame, the broadcast starts there
+   at once instead of fast-forwarding the session (0 = none, or it couldn't be
+   loaded: fast-forward to WECAMP_BROADCAST_FROM_FRAME). */
+static unsigned s_bc_checkpoint;
+static bool s_bc_checkpoint_tried;
+static bool kailleraBroadcasterLoadCheckpoint(unsigned card);
+
 static void PlaybackSetFastForward(bool on);
 
 static void kailleraBroadcasterReadControl(void) {
@@ -1098,11 +1107,13 @@ void kailleraBroadcasterStartIfRequested(void) {
          char v[32];
          if (GetEnvironmentVariableA("WECAMP_BROADCAST_FROM_FRAME", v, sizeof(v)))
             s_bc_from_frame = (unsigned)strtoul(v, NULL, 10);
+         if (GetEnvironmentVariableA("WECAMP_BROADCAST_CHECKPOINT", v, sizeof(v)))
+            s_bc_checkpoint = (unsigned)strtoul(v, NULL, 10);
       }
       if (!GetEnvironmentVariableA("WECAMP_CONTROL_FILE", s_bc_control, sizeof(s_bc_control)))
          s_bc_control[0] = '\0';
-      RARCH_LOG("[WE Camp]: broadcaster starting Watch Live session %s (%s), stream from frame %u\n",
-            session_id, room_name, s_bc_from_frame);
+      RARCH_LOG("[WE Camp]: broadcaster starting Watch Live session %s (%s), stream from frame %u (card savestate %u)\n",
+            session_id, room_name, s_bc_from_frame, s_bc_checkpoint);
       /* The DLL's headless loop reads the same variables and starts Watch Live. */
       LoadKaillera();
       if (kailleraWatchSessionF == NULL)
@@ -1112,6 +1123,12 @@ void kailleraBroadcasterStartIfRequested(void) {
 
    if (kailleraNetplay) {
       s_bc_game_seen = true;
+      /* The card's savestate: the match from its start, at 1x right away. */
+      if (s_bc_checkpoint && !s_bc_checkpoint_tried) {
+         s_bc_checkpoint_tried = true;
+         if (kailleraBroadcasterLoadCheckpoint(s_bc_checkpoint))
+            s_bc_from_frame = 0;
+      }
       if (!s_bc_rec_tried) {
          if ((unsigned)current_core_frame < s_bc_from_frame) {
             /* Catching up to the kickoff: as fast as the CPU goes, nothing
@@ -1381,6 +1398,61 @@ static void WatchStateTrailerApply(const void *src) {
    for (i = 0; i < MAX_INPUTS; i++)
       players[i].playerNumber = t.player_number[i];
    kaillera_swap_cntr = t.swap_cntr;
+}
+
+/* The WE Camp broadcaster's start (WECAMP_BROADCAST_CHECKPOINT): the
+   savestate of the card's start the host's PC uploaded
+   (kailleraWatchServiceCheckpoint()), applied like "Ir ao vivo!"'s
+   (WatchGoLiveApply()) - then the frame counter goes on in the host's
+   numbering, the one of the stop frame the site sends (the next frame run
+   is the host's frame_index, the first one the state hasn't applied).
+   Blocking (a few MB, before anything is streamed); false = fast-forward. */
+static bool kailleraBroadcasterLoadCheckpoint(unsigned card) {
+#ifdef _WIN32
+   size_t state_size = core_serialize_size();
+   size_t cap        = state_size + sizeof(watch_state_trailer_t);
+   int n = -1, frame_index = 0, byte_offset = 0, tries;
+   retro_ctx_serialize_info_t info;
+   void *buf;
+
+   if (kailleraWatchDownloadCheckpointF == NULL || state_size == 0) {
+      RARCH_ERR("[WE Camp]: no card savestate support (DLL or core) - fast-forwarding\n");
+      return false;
+   }
+   buf = malloc(cap);
+   if (buf == NULL)
+      return false;
+   for (tries = 0; tries < 3 && n < 0; tries++) {
+      if (tries)
+         Sleep(2000);
+      n = kailleraWatchDownloadCheckpointF((int)card, buf, (int)cap, &frame_index, &byte_offset);
+   }
+   /* state_size alone = a host build older than watch_state_trailer_t */
+   if ((n != (int)state_size && n != (int)cap) || frame_index <= 0) {
+      RARCH_ERR("[WE Camp]: card %u savestate not available (%d bytes) - fast-forwarding\n", card, n);
+      free(buf);
+      return false;
+   }
+   info.data_const = buf;
+   info.data       = NULL;
+   info.size       = state_size;
+   if (!core_unserialize(&info)) {
+      RARCH_ERR("[WE Camp]: card %u savestate did not load - fast-forwarding\n", card);
+      free(buf);
+      return false;
+   }
+   if (n == (int)cap)
+      WatchStateTrailerApply((const char*)buf + state_size);
+   free(buf);
+   kailleraWatchJumpToLive(frame_index, byte_offset);
+   current_core_frame = (unsigned)frame_index - 1; /* core_run() counts it up before the frame */
+   RARCH_LOG("[WE Camp]: started from card %u's savestate (host frame %d, stream offset %d)\n",
+         card, frame_index, byte_offset);
+   return true;
+#else
+   (void)card;
+   return false;
+#endif
 }
 #endif
 
