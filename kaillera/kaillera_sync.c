@@ -2219,6 +2219,7 @@ static const ksync_we_map ksync_we_maps[] = {
 #define KSYNC_LIVE_MIN_KICKOFF      1800 /* a half of 30 s or more         */
 #define KSYNC_LIVE_OVER_FRAMES      600  /* WE3: 10 s with no time left = the end */
 #define KSYNC_LIVE_JSON_LEN         8192
+#define KSYNC_LIVE_PK_MAX           30   /* shootout kicks kept per side (5 + the sudden death's) */
 #define KSYNC_LIVE_EVENTS           24   /* cards / injuries kept per side */
 #define KSYNC_LIVE_INJURY_RECORDS   10   /* WE2002's injury list: the records it clears at a match's load */
 #define KSYNC_CARD_YELLOW           1
@@ -2265,6 +2266,18 @@ static struct
    bool     goal_pen[2][32];
    uint32_t so_state;       /* WE2002 shootout: pens + state byte, and since when */
    unsigned so_since;
+   /* The shootout kick by kick (ksync_live_pk_watch()): per side, each kick
+      in order (1 goal, 0 miss) - sent while pk_ok: the list is the whole
+      shootout (seen from its start) and matches its score. */
+   uint8_t  pk[2][KSYNC_LIVE_PK_MAX];
+   unsigned pk_count[2];
+   unsigned pk_pens[2];     /* the shootout's score when the last kick ended */
+   unsigned pk_kicker;      /* the kicker word (ksync_pk_map) the last frame */
+   unsigned pk_prev_over;   /* the sub-state the last frame */
+   unsigned pk_last_side;   /* the side of the last kick over */
+   bool     pk_started;     /* this match's shootout seen */
+   bool     pk_armed;       /* a kick set up, its end not seen yet */
+   bool     pk_ok;
    unsigned et_goals;       /* WE2002 extra time: goals seen (both teams) ... */
    unsigned gg_clock;       /* ... and the clock + 1 when the last one came in, while it hasn't
                                moved since (a golden goal ends the match there) - 0 = none */
@@ -2397,6 +2410,183 @@ static void ksync_live_pause_watch(const uint8_t *ram, unsigned frame)
             ksync_live.quit = true;
       }
    }
+}
+
+/* The shootout kick by kick - WE2002's (not seen in the other engines yet):
+   - kicker: a word that changes for every kick - the player about to kick,
+     as his team's data x map->roster_len + his roster index (Coreia, team
+     2: 56 = 2 x 23 + 10, then 55, 54...; Japão, 18: 424, 423...) - his side
+     from the match's ids (map->player_ids, {roster index, team});
+   - over: the match's sub-state (the byte after map->state): `kicking`
+     while a kick is taken, `over_value` for a moment once it is over - a
+     goal already in map->pens - and again in the result screen, the
+     shootout decided (map->state then the referee's end).
+   Seen on replays 37272 (Coreia x Japão 5x4: 12 kicks, 3 misses - one with
+   nothing else in the RAM saying so) and 10564 (Canadá x Brasil 5x3). The
+   game's own marks on screen (a table at 0x80054548, 10 bytes per mark)
+   start over at each round of the sudden death - not used. */
+typedef struct
+{
+   const char *serial;     /* the engine (ksync_we_map's) */
+   size_t      kicker;
+   size_t      over;
+   unsigned    kicking;
+   unsigned    over_value;
+} ksync_pk_map;
+
+static const ksync_pk_map ksync_pk_maps[] = {
+   { "SLPM_870.56", 0x75520, 0x75783, 3, 4 },
+};
+
+static const ksync_pk_map *ksync_live_pk_map(const ksync_we_map *map)
+{
+   size_t i;
+
+   for (i = 0; map && i < sizeof(ksync_pk_maps) / sizeof(ksync_pk_maps[0]); i++)
+      if (strcmp(map->serial, ksync_pk_maps[i].serial) == 0)
+         return &ksync_pk_maps[i];
+   return NULL;
+}
+
+/* A kick of `side` over: a goal if its score went up since the last kick's
+   end, a miss otherwise. The list stops going to WE Camp (pk_ok) if it
+   doesn't match the score or the turns. */
+static void ksync_live_pk_kick(const unsigned *pens, unsigned side)
+{
+   unsigned s, i, goals;
+
+   ksync_live.pk_armed     = false;
+   ksync_live.pk_last_side = side;
+   if (ksync_live.pk_count[side] >= KSYNC_LIVE_PK_MAX)
+   {
+      ksync_live.pk_ok = false;
+      return;
+   }
+   ksync_live.pk[side][ksync_live.pk_count[side]++] = pens[side] > ksync_live.pk_pens[side];
+   ksync_live.pk_pens[0] = pens[0];
+   ksync_live.pk_pens[1] = pens[1];
+   for (s = 0; s < 2; s++)
+   {
+      for (goals = 0, i = 0; i < ksync_live.pk_count[s]; i++)
+         goals += ksync_live.pk[s][i];
+      if (goals != pens[s])
+         ksync_live.pk_ok = false;
+   }
+   if (ksync_live.pk_count[0] > ksync_live.pk_count[1] + 1
+         || ksync_live.pk_count[1] > ksync_live.pk_count[0] + 1)
+      ksync_live.pk_ok = false;
+}
+
+static unsigned ksync_live_u16(const uint8_t *ram, size_t addr);
+
+/* The side of the kick going on: the kicker's id in the match's ids - or,
+   the same team on both sides (or no ids), the other side than the last
+   kick's; the first one, the side whose score went up or LOCAL (both
+   replays seen started with LOCAL - a wrong guess breaks the score check,
+   and the list stops going). */
+static unsigned ksync_live_pk_side(const uint8_t *ram, const ksync_we_map *map, unsigned kicker,
+      const unsigned *pens)
+{
+   unsigned s, i, id, found = 0; /* bit 0 LOCAL, bit 1 VISITA */
+
+   if (map->player_ids && map->roster_len)
+   {
+      id = (kicker % map->roster_len) | (kicker / map->roster_len) << 8;
+      for (s = 0; s < 2; s++)
+         for (i = 0; i < KSYNC_LIVE_PLAYER_IDS && i < map->roster_len; i++)
+            if (ksync_live_u16(ram, map->player_ids + 2 * (s * KSYNC_LIVE_PLAYER_IDS + i)) == id)
+               found |= 1u << s;
+   }
+   if (found == 1 || found == 2)
+      return found == 2;
+   if (ksync_live.pk_count[0] || ksync_live.pk_count[1])
+      return !ksync_live.pk_last_side;
+   return pens[1] > ksync_live.pk_pens[1] && pens[0] == ksync_live.pk_pens[0] ? 1 : 0;
+}
+
+/* Every frame of a shootout (ksync_live_pk_map()): each kick's end - the
+   last one's lasts a frame or two before the result screen, too short for
+   the sample twice a second. */
+static void ksync_live_pk_watch(const uint8_t *ram)
+{
+   const ksync_we_map *map = ksync_live.map;
+   const ksync_pk_map *pm;
+   unsigned pens[2], kicker, over;
+   bool ended;
+
+   /* (the map first: WE3's phase is in the scratchpad, not in `ram`) */
+   if (!ksync_live.active || !map || !(pm = ksync_live_pk_map(map)) || !map->phase || !map->pens
+         || !map->state || ram[map->phase] != 4)
+      return;
+   pens[0] = ram[map->pens];
+   pens[1] = ram[map->pens + 1];
+   kicker  = ksync_live_u16(ram, pm->kicker);
+   over    = ram[pm->over];
+   if (!ksync_live.pk_started)
+   {
+      /* The list only from its start (0 x 0, no kick over yet): not a
+         match joined mid-shootout. */
+      ksync_live.pk_started   = true;
+      ksync_live.pk_ok        = pens[0] == 0 && pens[1] == 0 && over != pm->over_value;
+      ksync_live.pk_kicker    = kicker;
+      ksync_live.pk_prev_over = over;
+      return;
+   }
+   /* A kick set up: another kicker - or, the first one, its kick starting
+      (the word may be the one left from before the shootout). */
+   if (kicker != ksync_live.pk_kicker
+         || (over == pm->kicking && ksync_live.pk_prev_over != pm->kicking
+            && !ksync_live.pk_count[0] && !ksync_live.pk_count[1]))
+      ksync_live.pk_armed = true;
+   ended = over == pm->over_value && ksync_live.pk_prev_over != pm->over_value;
+   ksync_live.pk_kicker    = kicker;
+   ksync_live.pk_prev_over = over;
+   if (ended && ksync_live.pk_armed && ram[map->state] != WE_STATE_OVER)
+      ksync_live_pk_kick(pens, ksync_live_pk_side(ram, map, kicker, pens));
+}
+
+/* The final: a goal of the kick going on whose end wasn't seen yet (the
+   result came at once) still counts - a miss can't be told from a kick
+   that never happened, so it stays out. */
+static void ksync_live_pk_settle(const uint8_t *ram)
+{
+   const ksync_we_map *map = ksync_live.map;
+   const ksync_pk_map *pm  = ksync_live_pk_map(map);
+   unsigned pens[2], side;
+
+   if (!pm || !ksync_live.pk_started || !ksync_live.pk_armed || !ksync_live.pk_ok)
+      return;
+   pens[0] = ram[map->pens];
+   pens[1] = ram[map->pens + 1];
+   side    = ksync_live_pk_side(ram, map, ksync_live_u16(ram, pm->kicker), pens);
+   if (pens[side] == ksync_live.pk_pens[side] + 1 && pens[!side] == ksync_live.pk_pens[!side])
+      ksync_live_pk_kick(pens, side);
+}
+
+/* "pk" for WE Camp: [[LOCAL's kicks], [VISITA's]], 1 goal / 0 miss. */
+static int ksync_live_pk_json(char *out, size_t cap)
+{
+   char buf[2 * (2 * KSYNC_LIVE_PK_MAX + 2) + 16];
+   size_t n;
+   unsigned s, i;
+
+   memcpy(buf, "\"pk\":[", 6);
+   n = 6;
+   for (s = 0; s < 2; s++)
+   {
+      buf[n++] = '[';
+      for (i = 0; i < ksync_live.pk_count[s]; i++)
+      {
+         if (i)
+            buf[n++] = ',';
+         buf[n++] = ksync_live.pk[s][i] ? '1' : '0';
+      }
+      buf[n++] = ']';
+      buf[n++] = s ? ']' : ',';
+   }
+   buf[n++] = ',';
+   buf[n]   = '\0';
+   return snprintf(out, cap, "%s", buf);
 }
 
 /* The match being played ended without its end - the game left it or its
@@ -2639,6 +2829,9 @@ static uint32_t ksync_live_sig(const uint8_t *ram, const uint8_t *st, const ksyn
       h = (h ^ ksync_live_b(ram, st, map->pens)) * 16777619u;
       h = (h ^ ksync_live_b(ram, st, map->pens + 1)) * 16777619u;
    }
+   /* A shootout kick (a miss doesn't change the score). */
+   h = (h ^ (ksync_live.pk_count[0] | ksync_live.pk_count[1] << 8
+         | (unsigned)ksync_live.pk_ok << 16)) * 16777619u;
    KSYNC_LIVE_MIX(ram, map->goals[0], 32 * map->goal_size);
    KSYNC_LIVE_MIX(ram, map->goals[1], 32 * map->goal_size);
    /* A card / an injury (ksync_live_events()) - not the stats, sent along. */
@@ -2790,6 +2983,9 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    if (map->pens && n > 0 && (size_t)n < cap && (shootout || ksync_live.so_seen))
       n += snprintf(out + n, cap - n, "\"pens\":[%u,%u],", ksync_live_b(ram, st, map->pens),
             ksync_live_b(ram, st, map->pens + 1));
+   /* ... and kick by kick (ksync_live_pk_watch()), when the list is right. */
+   if (map->pens && ksync_live.pk_started && ksync_live.pk_ok && n > 0 && (size_t)n < cap)
+      n += ksync_live_pk_json(out + n, cap - n);
    /* The referee ended the period (map->state) - "Intervalo" only from then. */
    if (map->state && n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "\"over\":%d,",
@@ -2900,6 +3096,11 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
    }
    ksync_live.active       = true;
    ksync_live.so_seen      = false;
+   ksync_live.pk_started   = false;
+   ksync_live.pk_armed     = false;
+   ksync_live.pk_ok        = false;
+   ksync_live.pk_count[0]  = ksync_live.pk_count[1] = 0;
+   ksync_live.pk_pens[0]   = ksync_live.pk_pens[1]  = 0;
    ksync_live.run_phase    = 0;
    ksync_live.drop_frame   = 0;
    ksync_live.kickoff      = kickoff;
@@ -3241,6 +3442,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    ksync_live.sent_frame = frame;
    if (final)
    {
+      ksync_live_pk_settle(ram);
       /* The score stays; WE2002's period went back to 0. */
       ksync_live.active = false;
       period            = 1;
@@ -3303,6 +3505,7 @@ void kailleraSyncAfterFrame(unsigned frame)
    ksync_live_goal_watch(ram, ksync_live.active && ksync_live.map && ksync_live.map->scratch
          ? ksync_live_scratchpad() : NULL, frame);
    ksync_live_pause_watch(ram, frame);
+   ksync_live_pk_watch(ram);
    if (frame % KSYNC_LIVE_SAMPLE_FRAMES == 0)
    {
       if (kailleraLiveEnabledExternal())
