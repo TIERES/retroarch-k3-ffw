@@ -212,6 +212,12 @@ void kailleraRetryConnectToolbarTick();
    actually hosting with "Stream ao vivo!" enabled. */
 void kailleraWatchServiceStateRequest();
 
+/* WE Camp broadcaster - call right after kailleraWatchServiceStateRequest():
+   the savestate a WE Camp card's start asked for (the settings screen, a
+   Repeat or the kickoff), handed to the DLL - which uploads it only from the
+   PC sending the Stream ao vivo. No-op otherwise (nearly every frame). */
+void kailleraWatchServiceCheckpoint(void);
+
 extern volatile int kailleraInitialisedInternal;
 extern int kNumPlayers;
 extern int kPlayerNumber;
