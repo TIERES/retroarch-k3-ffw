@@ -2063,13 +2063,22 @@ typedef struct
       a name read from the RAM wins (a patch may rename teams). */
    const char *const *fixed_names;
    unsigned fixed_count;
-   /* WE2002: 1 while the pause menu is open (whoever opened it - Start with
-      the ball in play; Start skipping a replay doesn't open it) and the pad
-      that opened it, 0 = pad 1 (the menu's "PAUSE JOYPAD 1"): a match left
-      right after it was left from its EXIT MATCH (ksync_live_left()) - 0 =
-      engine without them. */
+   /* The pause menu: 1 while it is open (whoever opened it - Start with the
+      ball in play; Start skipping a replay or the half time don't open it),
+      the pad that opened it (0 = pad 1, the menu's "PAUSE JOYPAD 1" - only
+      that pad moves it), its cursor (the item, from 0) and the item of EXIT
+      MATCH. The menu closing with the cursor still on EXIT MATCH is its
+      "Yes" - Start or X close it with the cursor already back on the first
+      item (two frames before): the player who opened it left the match
+      (ksync_live_pause_watch(), ksync_live_left()). 0 = engine without them.
+      pause_waits: Start and X keep the cursor where it was (WE3) - the menu
+      closing on EXIT MATCH is its "Yes" only if the match is left within
+      KSYNC_LIVE_QUIT_FRAMES. */
    size_t   pause;
    size_t   pauser;
+   size_t   pause_cursor;
+   unsigned pause_exit;
+   bool     pause_waits;
 } ksync_we_map;
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
@@ -2101,10 +2110,10 @@ static const ksync_we_map ksync_we_maps[] = {
         a rematch (no settings screen) keeps them. */
      2, 0xFF, 0, 0, 0, 0x72B30,
      0x756F2, { 0x75568, 0x7557F }, 0x73968, 0, 0, NULL, 0,
-     /* The pause menu and its pad (checked in the harness on real matches:
-        opened by pad 1 and by pad 2 from the same moment, EXIT MATCH, and
-        Start skipping replays and at half time leaving it at 0). */
-     0x61CD0, 0x75501 },
+     /* The pause menu, its pad, cursor and EXIT MATCH (checked in the
+        harness: the real matches of the PW26 and a 1P x 2P on the Master
+        Liga 12 - both pads, EXIT MATCH with "Yes", Start and X closing it). */
+     0x61CD0, 0x75501, 0x75500, 6, false },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -2118,7 +2127,9 @@ static const ksync_we_map ksync_we_maps[] = {
      3, 2, 0, 0, 0, 0x72FD2,
      /* The RESULT numbers and each player's cards, as WE2002's (the injury
         list not found yet). */
-     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0, 0, 0 },
+     0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0,
+     /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
+     0x5291C, 0x75099, 0x75098, 6, false },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -2137,7 +2148,11 @@ static const ksync_we_map ksync_we_maps[] = {
         right before the goal records (the injury list not found yet). */
      0x1085B0, { 0x107F8D, 0x107FA3 }, 0,
      /* The shirt numbers, 22 per team. */
-     0x1346DC, 22, NULL, 0, 0, 0 },
+     0x1346DC, 22, NULL, 0,
+     /* The pause menu (as WE2002's - in the RAM, not the scratchpad; checked
+        in the harness, 1P x 2P). Start and X close it with the cursor where
+        it was: its EXIT MATCH counts when the match is left (in_match). */
+     0xE6B78, 0xFF6E0, 0xE7D8A, 6, true },
    /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
       the same structures and values, moved, with 26 players per team -
       extra time (a third of the half) and the shootout too. The team names
@@ -2160,7 +2175,11 @@ static const ksync_we_map ksync_we_maps[] = {
      0x71158, 0x71156, 0, 0x772C9, 0x76F21, 0x711CE,
      2, 0xFF, 0, 0, 0, 0x6F288,
      0x7113C, { 0x70FA0, 0x70FBA }, 0x701E6, 0, 0,
-     ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]), 0, 0 },
+     ksync_jwe2001_names, sizeof(ksync_jwe2001_names) / sizeof(ksync_jwe2001_names[0]),
+     /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). After
+        EXIT MATCH nothing of the match changes (the clock even keeps going):
+        its "Yes" is the only sign it was left. */
+     0x5E451, 0x70F39, 0x70F38, 6, false },
    /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
       WE2002's engine two years earlier: the same structures and values,
       moved, with 22 players per team, and the team select screen's names
@@ -2177,7 +2196,9 @@ static const ksync_we_map ksync_we_maps[] = {
      0xBD590, 0x7FAA0, false, false, false, false, 0,
      0x75250, 0x7524E, 0, 0x7B385, 0x7AFDD, 0x752C6,
      2, 0xFF, 0, 0, 0, 0x72A90,
-     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0, 0, 0 },
+     0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0,
+     /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
+     0x61BB0, 0x75049, 0x75048, 6, false },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2253,10 +2274,14 @@ static struct
    ksync_live_event injuries[2][KSYNC_LIVE_EVENTS];
    unsigned injury_count[2];
    unsigned injury_seen;       /* records of the game's injury list already listed */
-   /* map->pause: the pad + 1 that last opened the pause menu in this match
-      (0 = none) and the last frame it was open (ksync_live_pause_watch()). */
+   /* map->pause (ksync_live_pause_watch()): the pad + 1 that last opened the
+      pause menu in this match (0 = none), the menu open and its item the
+      last frame it was, and the menu closed by its EXIT MATCH's "Yes". */
    unsigned pause_pad;
-   unsigned pause_frame;
+   bool     pause_open;
+   unsigned pause_item;
+   bool     quit;
+   unsigned exit_frame;  /* map->pause_waits: the menu closed on EXIT MATCH then (0 = not) */
 } ksync_live;
 
 static void ksync_live_reset(void)
@@ -2281,9 +2306,8 @@ static void ksync_live_reset(void)
 /* WE4: the ball stopped this long without the referee ending the period -
    they left the match from the pause menu. */
 #define KSYNC_LIVE_LEFT_FRAMES 60
-/* WE2002: the match left this long after the pause menu was open was left
-   from its EXIT MATCH - the game fades out and only then leaves it (~6 s
-   after "Yes"). */
+/* map->pause_waits (WE3): the match left this long after the pause menu
+   closed on EXIT MATCH was left from it (the game fades out first). */
 #define KSYNC_LIVE_QUIT_FRAMES 900
 
 /* Every frame of a match (map->touch only): who touched the ball last and
@@ -2329,40 +2353,60 @@ static void ksync_live_goal_watch(const uint8_t *ram, const uint8_t *sc, unsigne
    ksync_live.watching = true;
 }
 
-/* Every frame of a match (map->pause only): the pause menu open and the pad
-   that opened it - EXIT MATCH can be picked in less than a sample's 30
-   frames. */
+/* Every frame of a match (map->pause only): the pause menu open, the pad
+   that opened it and its item - EXIT MATCH can be picked in less than a
+   sample's 30 frames. The menu closing with its item still on EXIT MATCH
+   is its "Yes" (Start and X put the item back on the first one before it
+   closes): the match was left - ksync_live_sample() ends it at once. */
 static void ksync_live_pause_watch(const uint8_t *ram, unsigned frame)
 {
    const ksync_we_map *map = ksync_live.map;
    unsigned pad;
 
-   if (!ksync_live.active || !map || !map->pause || ram[map->pause] != 1)
+   if (!ksync_live.active || !map || !map->pause)
       return;
-   pad = ram[map->pauser];
-   if (pad < 4)
+   if (ram[map->pause] == 1)
    {
-      ksync_live.pause_pad   = pad + 1;
-      ksync_live.pause_frame = frame;
+      pad = ram[map->pauser];
+      if (pad < 4)
+         ksync_live.pause_pad = pad + 1;
+      ksync_live.pause_item = ram[map->pause_cursor];
+      ksync_live.pause_open = true;
+   }
+   else if (ksync_live.pause_open)
+   {
+      ksync_live.pause_open = false;
+      if (ksync_live.pause_item == map->pause_exit && ksync_live.pause_pad)
+      {
+         if (map->pause_waits)
+            ksync_live.exit_frame = frame;
+         else
+            ksync_live.quit = true;
+      }
    }
 }
 
 /* The match being played ended without its end - the game left it or its
-   RAM stopped being a match. Right after the pause menu was open (map->pause:
-   its EXIT MATCH), the player who opened it left the match: the last state
-   goes to WE Camp again with "quit", his pad (1-4) - the score at that
-   moment stands and he loses the triple XP. Not in the first seconds after
-   the whistle (KSYNC_LIVE_GRACE_FRAMES): no state was sent yet then. */
+   RAM stopped being a match. From the pause menu's EXIT MATCH
+   (ksync_live.quit, or - map->pause_waits - the menu closed on it a moment
+   before), the player who opened it left the match: the last state goes to
+   WE Camp again with "quit", his pad (1-4) - the score at that moment stands
+   and he loses the triple XP. Not in the first seconds after the whistle
+   (KSYNC_LIVE_GRACE_FRAMES): no state was sent yet then. */
 static void ksync_live_left(unsigned frame)
 {
    char json[KSYNC_LIVE_JSON_LEN];
    bool quit = ksync_live.active && ksync_live.pause_pad && ksync_live.last_json[0] == '{'
-         && frame - ksync_live.pause_frame <= KSYNC_LIVE_QUIT_FRAMES;
+         && (ksync_live.quit || (ksync_live.exit_frame
+            && frame - ksync_live.exit_frame <= KSYNC_LIVE_QUIT_FRAMES));
    int n     = quit ? snprintf(json, sizeof(json), "{\"quit\":%u,%s", ksync_live.pause_pad,
          ksync_live.last_json + 1) : 0;
 
-   ksync_live.active    = false;
-   ksync_live.pause_pad = 0;
+   ksync_live.active     = false;
+   ksync_live.pause_pad  = 0;
+   ksync_live.pause_open = false;
+   ksync_live.quit       = false;
+   ksync_live.exit_frame = 0;
    if (n > 0 && (size_t)n < sizeof(json))
       kailleraLiveMatchExternal(json);
 }
@@ -2844,7 +2888,9 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
    ksync_live.injury_count[0] = ksync_live.injury_count[1] = 0;
    ksync_live.injury_seen     = 0;
    ksync_live.pause_pad       = 0;
-   ksync_live.pause_frame     = 0;
+   ksync_live.pause_open      = false;
+   ksync_live.quit            = false;
+   ksync_live.exit_frame      = 0;
    /* A kickoff: the cards and injuries the game still has then (a restarted
       match) are from before it - only a match joined midway lists them. */
    if (kickoff && (map->cards[0] || map->injuries))
@@ -2869,6 +2915,10 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       ksync_live.have_prev = false;
       return;
    }
+   /* EXIT MATCH's "Yes" (ksync_live_pause_watch()): the match ends here -
+      J.League 2001 doesn't change anything else of it when it is left. */
+   if (ksync_live.active && ksync_live.quit)
+      ksync_live_left(frame);
    in_play  = map->in_play ? ram[map->in_play] : 1;
    in_match = map->in_match ? ksync_live_b(ram, st, map->in_match) : 1;
    phase    = map->phase ? ksync_live_b(ram, st, map->phase) : 0;
