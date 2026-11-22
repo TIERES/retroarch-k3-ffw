@@ -83,6 +83,16 @@ void kailleraSyncFrameTick(void);
    detects an actual mid-match desync (4. below). */
 void kailleraSyncAfterFrame(unsigned frame);
 
+/* Placar ao vivo: the WE Camp card a savestate was asked for (its start
+   frame - the match's settings screen, a Repeat or its kickoff), once; 0 =
+   none. kaillera.c takes the savestate at the top of the next frame and the
+   DLL uploads it from the PC sending the Stream ao vivo - the broadcaster
+   starts the match's YouTube live from it. */
+unsigned kailleraSyncCheckpointWanted(void);
+
+/* A player left the Kaillera game (drop callback, any thread): no new card. */
+void kailleraSyncPlayerDropped(void);
+
 /* Retry-connect go-live (end of the countdown, host and peers alike): every
    side resumes from the same loaded state, so the RAM desync detector -
    off during the replay phase, whose frame counters differ per machine -

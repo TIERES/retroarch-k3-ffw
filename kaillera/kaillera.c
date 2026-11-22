@@ -252,6 +252,8 @@ static void WINAPI kailleraClientDroppedCallback(char* nick, int playernb)
    new_msg[0] = '\0';
    snprintf(new_msg, sizeof(new_msg), "Dropped: %s (Player %i)", nick, playernb);
    runloop_msg_queue_push(new_msg, 0, 5 * 60, false, NULL, MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+   /* Placar ao vivo: no new card without both players in the game. */
+   kailleraSyncPlayerDropped();
 }
 
 
@@ -488,6 +490,11 @@ void (WINAPI* kailleraWatchJumpToLiveF)(int frameIndex, int byteOffset);
 int (WINAPI* kailleraWatchGoLiveLockedF)();
 int (WINAPI* kailleraStreamCheckStateRequestedF)();
 void (WINAPI* kailleraStreamUploadStateF)(int frameIndex, const void* data, int size);
+/* The broadcaster's start of a WE Camp card (kailleraWatchServiceCheckpoint()) -
+   optional, same convention. */
+void (WINAPI* kailleraStreamUploadCheckpointF)(int card, int frameIndex, const void* data, int size);
+/* ...and the broadcaster's download of it (feature/wecamp-broadcaster). */
+int (WINAPI* kailleraWatchDownloadCheckpointF)(int card, void* outBuffer, int bufferCap, int* outFrameIndex, int* outByteOffset);
 
 /* The room's ISO check - optional, same convention: a DLL that has it gets
    kailleraContentIdForGame() (below) right after kailleraSetInfos(). */
@@ -543,6 +550,8 @@ void CloseKaillera() {
    kailleraWatchGoLiveLockedF              = NULL;
    kailleraStreamCheckStateRequestedF      = NULL;
    kailleraStreamUploadStateF              = NULL;
+   kailleraStreamUploadCheckpointF         = NULL;
+   kailleraWatchDownloadCheckpointF        = NULL;
    kailleraSetContentIdCallbackF           = NULL;
 
    if (kailleraDLL)
@@ -905,6 +914,8 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraWatchGoLiveLocked");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "kailleraStreamCheckStateRequested");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadState");
+      kailleraStreamUploadCheckpointF = (void (WINAPI*)(int, int, const void*, int)) GetProcAddress(kailleraDLL, "kailleraStreamUploadCheckpoint");
+      kailleraWatchDownloadCheckpointF = (int (WINAPI*)(int, void*, int, int*, int*)) GetProcAddress(kailleraDLL, "kailleraWatchDownloadCheckpoint");
       kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "kailleraSetContentIdCallback");
 #else
       kailleraGetVersionF = (int (WINAPI*)(char* version)) GetProcAddress(kailleraDLL, "_kailleraGetVersion@4");
@@ -945,6 +956,8 @@ void LoadKaillera() {
       kailleraWatchGoLiveLockedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraWatchGoLiveLocked@0");
       kailleraStreamCheckStateRequestedF = (int (WINAPI*)()) GetProcAddress(kailleraDLL, "_kailleraStreamCheckStateRequested@0");
       kailleraStreamUploadStateF = (void (WINAPI*)(int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadState@12");
+      kailleraStreamUploadCheckpointF = (void (WINAPI*)(int, int, const void*, int)) GetProcAddress(kailleraDLL, "_kailleraStreamUploadCheckpoint@16");
+      kailleraWatchDownloadCheckpointF = (int (WINAPI*)(int, void*, int, int*, int*)) GetProcAddress(kailleraDLL, "_kailleraWatchDownloadCheckpoint@20");
       kailleraSetContentIdCallbackF = (void (WINAPI*)(int (WINAPI*)(const char*, int, char*, int))) GetProcAddress(kailleraDLL, "_kailleraSetContentIdCallback@4");
 #endif
 
@@ -1410,6 +1423,45 @@ void kailleraWatchServiceStateRequest(void) {
             meaningful on the receiving end anyway (see
             n02_stream_upload_state()'s own doc comment). */
          kailleraStreamUploadStateF((int)current_core_frame, state_buf, (int)(state_size + sizeof(watch_state_trailer_t)));
+      }
+   }
+   free(state_buf);
+#endif
+}
+
+/* Placar ao vivo / WE Camp broadcaster: the start of a match's card (its
+   settings screen, a Repeat or its kickoff - kailleraSyncCheckpointWanted())
+   gets a savestate, taken here - the top of the frame after it, exactly where
+   kailleraWatchServiceStateRequest() takes its own, so the DLL pairs it with
+   the stream offset of the next input (n02_stream_upload_state()'s rule).
+   The DLL uploads it only from the PC sending the Stream ao vivo; the
+   broadcaster loads it and plays the match from there at normal speed
+   instead of fast-forwarding the session from its first frame. */
+void kailleraWatchServiceCheckpoint(void) {
+#if defined(N02_WIN32) || defined(N02_LINUX)
+   /* no-op - see kailleraRetryConnectCanControl() above */
+#else
+   size_t   state_size;
+   void    *state_buf;
+   unsigned card = kailleraSyncCheckpointWanted();
+
+   if (!card || kailleraStreamUploadCheckpointF == NULL)
+      return;
+
+   state_size = core_serialize_size();
+   state_buf  = state_size ? malloc(state_size + sizeof(watch_state_trailer_t)) : NULL;
+   if (state_buf == NULL)
+      return;
+
+   {
+      retro_ctx_serialize_info_t info;
+      info.data       = state_buf;
+      info.data_const = NULL;
+      info.size       = state_size;
+      if (core_serialize(&info)) {
+         WatchStateTrailerFill((char*)state_buf + state_size);
+         kailleraStreamUploadCheckpointF((int)card, (int)current_core_frame, state_buf,
+               (int)(state_size + sizeof(watch_state_trailer_t)));
       }
    }
    free(state_buf);

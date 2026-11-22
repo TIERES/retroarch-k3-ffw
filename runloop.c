@@ -8094,6 +8094,9 @@ void core_run(void)
          comment). Same reasoning as the retry-connect ticks above for why
          this is safe to call unconditionally every kailleraNetplay frame. */
       kailleraWatchServiceStateRequest();
+      /* ... and the savestate of a WE Camp card's start, for the broadcaster
+         (asked by the previous frame's placar ao vivo sample). */
+      kailleraWatchServiceCheckpoint();
 
       /* Playback rewind (Left arrow) + periodic checkpoint capture - see
          kailleraPlaybackRewindTick()'s own doc comment. No-op outside solo
