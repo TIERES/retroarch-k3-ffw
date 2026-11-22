@@ -1509,19 +1509,64 @@ void kailleraWatchServiceStateRequest(void) {
    The DLL uploads it only from the PC sending the Stream ao vivo; the
    broadcaster loads it and plays the match from there at normal speed
    instead of fast-forwarding the session from its first frame. */
+/* After a card start's savestate + trailer: the match's memory cards as they
+   are right then (the core writes every save to the card file at once) -
+   KAILLERA_CARDS_MAGIC, which slots follow (bit 0 = slot 1, bit 1 = slot 2),
+   then each of them, KAILLERA_CARD_SIZE bytes. The WE Camp broadcaster puts
+   them in place before its core loads the cards: the state's memory card
+   flag (the TIERES core) only comes back for the same card contents, and a
+   save made earlier in the session (LOAD/SAVE STRATEGY...) isn't in the
+   versions the Watch Live marker names. Only M. Card online games have them
+   (kailleraSyncSaveDirectory()). */
+#define KAILLERA_CARDS_MAGIC 0x44524354u /* "TCRD" */
+#define KAILLERA_CARD_SIZE   (128 * 1024)
+
+static size_t kailleraCheckpointCards(char *out) {
+#ifdef _WIN32
+   const char *dir = kailleraSyncSaveDirectory();
+   uint32_t magic = KAILLERA_CARDS_MAGIC, slots = 0;
+   size_t n = 8;
+   int s;
+
+   if (dir == NULL)
+      return 0;
+   for (s = 0; s < 2; s++) {
+      char path[PATH_MAX_LENGTH];
+      FILE *f;
+      snprintf(path, sizeof(path), "%s\\pcsx-card%d.mcd", dir, s + 1);
+      if ((f = fopen(path, "rb")) == NULL)
+         continue; /* an empty slot */
+      if (fread(out + n, 1, KAILLERA_CARD_SIZE, f) == KAILLERA_CARD_SIZE && fgetc(f) == EOF) {
+         slots |= 1u << s;
+         n     += KAILLERA_CARD_SIZE;
+      }
+      fclose(f);
+   }
+   if (!slots)
+      return 0;
+   memcpy(out, &magic, 4);
+   memcpy(out + 4, &slots, 4);
+   return n;
+#else
+   (void)out;
+   return 0;
+#endif
+}
+
 void kailleraWatchServiceCheckpoint(void) {
 #if defined(N02_WIN32) || defined(N02_LINUX)
    /* no-op - see kailleraRetryConnectCanControl() above */
 #else
-   size_t   state_size;
-   void    *state_buf;
+   size_t   state_size, size;
+   char    *state_buf;
    unsigned card = kailleraSyncCheckpointWanted();
 
    if (!card || kailleraStreamUploadCheckpointF == NULL)
       return;
 
    state_size = core_serialize_size();
-   state_buf  = state_size ? malloc(state_size + sizeof(watch_state_trailer_t)) : NULL;
+   state_buf  = state_size ? (char*)malloc(state_size + sizeof(watch_state_trailer_t)
+         + 8 + 2 * KAILLERA_CARD_SIZE) : NULL;
    if (state_buf == NULL)
       return;
 
@@ -1531,9 +1576,10 @@ void kailleraWatchServiceCheckpoint(void) {
       info.data_const = NULL;
       info.size       = state_size;
       if (core_serialize(&info)) {
-         WatchStateTrailerFill((char*)state_buf + state_size);
-         kailleraStreamUploadCheckpointF((int)card, (int)current_core_frame, state_buf,
-               (int)(state_size + sizeof(watch_state_trailer_t)));
+         WatchStateTrailerFill(state_buf + state_size);
+         size  = state_size + sizeof(watch_state_trailer_t);
+         size += kailleraCheckpointCards(state_buf + size);
+         kailleraStreamUploadCheckpointF((int)card, (int)current_core_frame, state_buf, (int)size);
       }
    }
    free(state_buf);
