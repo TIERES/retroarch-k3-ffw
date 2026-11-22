@@ -2048,7 +2048,8 @@ typedef struct
       yellow cards, corners (then free kicks and penalty kicks, not sent);
       each player's cards, a byte per roster index (cards[side] + index:
       1 yellow, 2 the second yellow - sent off -, 4 a direct red); and the
-      injured players: 4-byte records {roster index, team id, 0, 0}, FF =
+      injured players: 4-byte records {player id (2 bytes - see
+      player_ids; a national team's = {roster index, team id}), 0, 0}, FF =
       the end of the list - 0 = engine without them. */
    size_t   stats;
    size_t   cards[2];
@@ -2079,7 +2080,16 @@ typedef struct
    size_t   pause_cursor;
    unsigned pause_exit;
    bool     pause_waits;
+   /* WE2002: each roster index's player id, u16 {index in the game's player
+      data, the data's team} - LOCAL's 22 here, VISITA's 22 right after. An
+      injury record's first two bytes are this id: a national team's
+      players are its own team's (the id is {roster index, team id}), but a
+      Master League team takes its players from other teams' data (the
+      Master Liga 12's WARLEY, team 94: Koller = {8, 57}) - 0 = engine
+      without it (the record's 2nd byte is taken as the team). */
+   size_t   player_ids;
 } ksync_we_map;
+#define KSYNC_LIVE_PLAYER_IDS 22   /* map->player_ids: ids per side */
 #define WE_SET_EXTRA  1
 #define WE_SET_GOLDEN 2
 #define WE_SET_PENS   4
@@ -2113,7 +2123,10 @@ static const ksync_we_map ksync_we_maps[] = {
      /* The pause menu, its pad, cursor and EXIT MATCH (checked in the
         harness: the real matches of the PW26 and a 1P x 2P on the Master
         Liga 12 - both pads, EXIT MATCH with "Yes", Start and X closing it). */
-     0x61CD0, 0x75501, 0x75500, 6, false },
+     0x61CD0, 0x75501, 0x75500, 6, false,
+     /* The players' ids (checked on the PW26, the Euro 2004 and two Master
+        Liga 12 matches with an injury each). */
+     0x649F8 },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -2129,7 +2142,7 @@ static const ksync_we_map ksync_we_maps[] = {
         list not found yet). */
      0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0,
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
-     0x5291C, 0x75099, 0x75098, 6, false },
+     0x5291C, 0x75099, 0x75098, 6, false, 0 },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -2152,7 +2165,7 @@ static const ksync_we_map ksync_we_maps[] = {
      /* The pause menu (as WE2002's - in the RAM, not the scratchpad; checked
         in the harness, 1P x 2P). Start and X close it with the cursor where
         it was: its EXIT MATCH counts when the match is left (in_match). */
-     0xE6B78, 0xFF6E0, 0xE7D8A, 6, true },
+     0xE6B78, 0xFF6E0, 0xE7D8A, 6, true, 0 },
    /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
       the same structures and values, moved, with 26 players per team -
       extra time (a third of the half) and the shootout too. The team names
@@ -2179,7 +2192,7 @@ static const ksync_we_map ksync_we_maps[] = {
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). After
         EXIT MATCH nothing of the match changes (the clock even keeps going):
         its "Yes" is the only sign it was left. */
-     0x5E451, 0x70F39, 0x70F38, 6, false },
+     0x5E451, 0x70F39, 0x70F38, 6, false, 0 },
    /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
       WE2002's engine two years earlier: the same structures and values,
       moved, with 22 players per team, and the team select screen's names
@@ -2198,7 +2211,7 @@ static const ksync_we_map ksync_we_maps[] = {
      2, 0xFF, 0, 0, 0, 0x72A90,
      0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0,
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
-     0x61BB0, 0x75049, 0x75048, 6, false },
+     0x61BB0, 0x75049, 0x75048, 6, false, 0 },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2667,6 +2680,30 @@ static void ksync_live_add(ksync_live_event *list, unsigned *count, const uint8_
    e->kind   = kind;
 }
 
+/* The player of an injury record: its first two bytes are the player's id,
+   looked up in the match's ids (map->player_ids) - with no ids, or none
+   matching, {roster index, team id}. false = none of the match's players. */
+static bool ksync_live_injured(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      const uint8_t *rec, unsigned *side, unsigned *idx)
+{
+   unsigned s, i, team0 = ksync_live_team(st, map, 0);
+   unsigned id          = rec[0] | (rec[1] << 8);
+
+   for (s = 0; s < 2 && map->player_ids; s++)
+      for (i = 0; i < KSYNC_LIVE_PLAYER_IDS && i < map->roster_len; i++)
+         if (ksync_live_u16(ram, map->player_ids + 2 * (s * KSYNC_LIVE_PLAYER_IDS + i)) == id)
+         {
+            *side = s; /* the same team on both sides: LOCAL */
+            *idx  = i;
+            return true;
+         }
+   if (rec[0] >= map->roster_len || (rec[1] != team0 && rec[1] != ksync_live_team(st, map, 1)))
+      return false;
+   *side = rec[1] == team0 ? 0 : 1;
+   *idx  = rec[0];
+   return true;
+}
+
 /* Every sample of a match: the cards and injuries that showed up since the
    last one, at this minute - the RAM only keeps each player's card (and
    which players are hurt), not when. quiet: only take them as seen. */
@@ -2693,7 +2730,7 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
       }
    /* The injured players: the list only grows during the match (each
       record stays until the end; the game clears it at the match's load
-      and after its end). Its record is {roster index, team id, 0, 0} for a
+      and after its end). Its record is {player id (2 bytes), 0, 0} for a
       yellow cross - the red cross (the player leaves the field) not seen
       yet: every one goes as a yellow cross for now. */
    if (map->injuries)
@@ -2701,15 +2738,13 @@ static void ksync_live_events(const uint8_t *ram, const uint8_t *st, const ksync
       for (i = ksync_live.injury_seen; i < KSYNC_LIVE_INJURY_RECORDS; i++)
       {
          const uint8_t *rec = ram + map->injuries + 4 * i;
-         unsigned team0     = ksync_live_team(st, map, 0);
+         unsigned idx;
          if (rec[0] == 0xFF)
             break; /* the end of the list */
-         if (quiet || rec[0] >= map->roster_len
-               || (rec[1] != team0 && rec[1] != ksync_live_team(st, map, 1)))
+         if (quiet || !ksync_live_injured(ram, st, map, rec, &side, &idx))
             continue;
-         side = rec[1] == team0 ? 0 : 1; /* the same team on both sides: LOCAL */
          ksync_live_add(ksync_live.injuries[side], &ksync_live.injury_count[side], ram, st, map,
-               side, rec[0], minute, "y");
+               side, idx, minute, "y");
       }
       ksync_live.injury_seen = i;
    }
