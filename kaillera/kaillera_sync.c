@@ -1004,6 +1004,8 @@ int kailleraSyncContentId(const char *content_path, const char *core_path,
    return kailleraSyncContentId(content_path, core_path, false, out, len);
 }
 
+void (*kailleraSyncMemcardsReadyHook)(const char *dir, unsigned empty_slots);
+
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path)
 {
    char content_id[KSYNC_FIELD_LEN];
@@ -1078,6 +1080,8 @@ void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path
             content_id, ksync_mc_dir,
             (ksync_mc_empty_slots & 1) ? "vazio" : "cartão",
             (ksync_mc_empty_slots & 2) ? "vazio" : "cartão");
+      if (ksync_playback && kailleraSyncMemcardsReadyHook)
+         kailleraSyncMemcardsReadyHook(ksync_mc_dir, ksync_mc_empty_slots);
       return;
    }
 
@@ -2088,6 +2092,27 @@ typedef struct
       Master Liga 12's WARLEY, team 94: Koller = {8, 57}) - 0 = engine
       without it (the record's 2nd byte is taken as the team). */
    size_t   player_ids;
+   /* The match's card at WE Camp opens before the kickoff ("Aguardando o
+      início da partida"): on the match settings screen - the teams picked,
+      the time, weather, level and kits being chosen - and on the "Repeat" of
+      the menu after the RESULT (a rematch: the pre-match menu comes back,
+      without the settings screen). menu = the last in-game menu shown
+      (WE2002: 4 the front-end menus, 1 the pre-match menu - its formation
+      too -, 3 the pause menu or the RESULT screen, 2 the "Repeat / Exit"
+      menu): from menu_repeat straight to menu_prematch is the Repeat (Exit
+      goes to the front-end). setup_screen holds setup_value while the
+      settings screen is up (with menu at menu_front; a byte, or a 4-byte
+      word when the value is over 0xFF). repeat_on_arm: no such menu (WE3) -
+      its "continue" restarts the match at once, so the clock set for a
+      kickoff with no card open is the Repeat. 0 = engine without them: the
+      card opens at the kickoff. */
+   size_t   menu;
+   unsigned menu_front;
+   unsigned menu_prematch;
+   unsigned menu_repeat;
+   size_t   setup_screen;
+   uint32_t setup_value;
+   bool     repeat_on_arm;
 } ksync_we_map;
 #define KSYNC_LIVE_PLAYER_IDS 22   /* map->player_ids: ids per side */
 #define WE_SET_EXTRA  1
@@ -2126,7 +2151,12 @@ static const ksync_we_map ksync_we_maps[] = {
      0x61CD0, 0x75501, 0x75500, 6, false,
      /* The players' ids (checked on the PW26, the Euro 2004 and two Master
         Liga 12 matches with an injury each). */
-     0x649F8 },
+     0x649F8,
+     /* The last in-game menu and the settings screen (checked in the harness
+        on 40 real sessions - PW26, Copa Africana, Euro 2004, BR Turbo, World
+        Cup 26, Master Liga 12: 45 settings screens, 17 Repeats, 5 Exits, no
+        false one; the DEMO never shows the settings screen). */
+     0x754F5, 4, 1, 2, 0x10A625, 1, false },
    { "SLPM_862.91", "WE4",
      { { 0x17034, { 0x60, 0x00, 0x09, 0x24, 0x20, 0x00, 0x08, 0x24, 0x1E, 0x00, 0x07, 0x24, 0x21, 0x28, 0x27, 0x01 } },
        { 0x1D03C, { 0x01, 0x00, 0x84, 0x34, 0x00, 0x20, 0x05, 0x24, 0x00, 0x20, 0x06, 0x24, 0x07, 0x80, 0x01, 0x3C } } },
@@ -2142,7 +2172,14 @@ static const ksync_we_map ksync_we_maps[] = {
         list not found yet). */
      0x75283, { 0x750FF, 0x75115 }, 0, 0, 0, NULL, 0,
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
-     0x5291C, 0x75099, 0x75098, 6, false, 0 },
+     0x5291C, 0x75099, 0x75098, 6, false, 0,
+     /* The last in-game menu (as WE2002's: 4 front-end, 1 pre-match, 3
+        pause/RESULT, 2 "もう1試合続ける / モード選択画面に戻る") and the
+        settings screen: no flag byte - its overlay's handler table, whose
+        first word points into it, is only in the RAM while that screen is up
+        (checked on the 3 real WE4 sessions - every settings screen, nothing
+        else - and the Repeat / Exit driven in the harness). */
+     0x7508D, 4, 1, 2, 0x0B26B8, 0x800B2968u, false },
    /* WE3 Final Version - its patches too ("Camera torre TV mode"); the
       scratchpad offsets are from WE_SCRATCH. */
    { "SLPM_861.62", "WE3",
@@ -2165,7 +2202,11 @@ static const ksync_we_map ksync_we_maps[] = {
      /* The pause menu (as WE2002's - in the RAM, not the scratchpad; checked
         in the harness, 1P x 2P). Start and X close it with the cursor where
         it was: its EXIT MATCH counts when the match is left (in_match). */
-     0xE6B78, 0xFF6E0, 0xE7D8A, 6, true, 0 },
+     0xE6B78, 0xFF6E0, 0xE7D8A, 6, true, 0,
+     /* The settings screen (checked on 5 real WE3 sessions, the "trocar
+        time" path too); no last-menu byte: the RESULT menu's "試合を続ける"
+        restarts the match at once (driven in the harness) - repeat_on_arm. */
+     0, 0, 0, 0, 0x0D4CD3, 1, true },
    /* J.League Jikkyou Winning Eleven 2001 - WE2002's engine a year earlier:
       the same structures and values, moved, with 26 players per team -
       extra time (a third of the half) and the shootout too. The team names
@@ -2192,7 +2233,10 @@ static const ksync_we_map ksync_we_maps[] = {
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). After
         EXIT MATCH nothing of the match changes (the clock even keeps going):
         its "Yes" is the only sign it was left. */
-     0x5E451, 0x70F39, 0x70F38, 6, false, 0 },
+     0x5E451, 0x70F39, 0x70F38, 6, false, 0,
+     /* The last in-game menu and the settings screen, as WE2002's (moved;
+        checked on 3 real sessions - 2 Repeats - and driven in the harness). */
+     0x70F2D, 4, 1, 2, 0x0EBDED, 1, false },
    /* Winning Eleven 2000 U-23 (the Brazilian patch "Desafio U-23" too) -
       WE2002's engine two years earlier: the same structures and values,
       moved, with 22 players per team, and the team select screen's names
@@ -2211,7 +2255,10 @@ static const ksync_we_map ksync_we_maps[] = {
      2, 0xFF, 0, 0, 0, 0x72A90,
      0x75234, { 0x750B0, 0x750C6 }, 0x73866, 0, 0, NULL, 0,
      /* The pause menu (as WE2002's; checked in the harness, 1P x 2P). */
-     0x61BB0, 0x75049, 0x75048, 6, false, 0 },
+     0x61BB0, 0x75049, 0x75048, 6, false, 0,
+     /* The last in-game menu and the settings screen, as WE2002's (moved;
+        checked on 4 real sessions - 1 Repeat - and driven in the harness). */
+     0x7503D, 4, 1, 2, 0x110235, 1, false },
 };
 
 #define KSYNC_LIVE_SAMPLE_FRAMES    30   /* read twice a second            */
@@ -2295,11 +2342,31 @@ static struct
    unsigned pause_item;
    bool     quit;
    unsigned exit_frame;  /* map->pause_waits: the menu closed on EXIT MATCH then (0 = not) */
+   /* The match's card at WE Camp: its start frame - the settings screen, the
+      Repeat (map->menu) or the kickoff - sent as "setup" with every state of
+      it (WE Camp's key for the card); 0 = none open. */
+   unsigned card;
+   unsigned card_wait;      /* waiting for the kickoff: 1 "Aguardando o início da partida",
+                               2 "... o reinício" (left early - KSYNC_LIVE_RESTART_FRAMES); 0 = played */
+   bool     card_sent;      /* a state of this card went to WE Camp */
+   unsigned wait_since;     /* frame the card started waiting */
+   unsigned wait_sent;      /* frame the last waiting state went ... */
+   uint32_t wait_sig;       /* ... and what it had */
+   unsigned wait_team[2];   /* the teams while waiting (the last picked) */
+   unsigned prev_menu;      /* map->menu, the last sample */
+   bool repeat_wait;        /* a Repeat with no pad on a side yet: its card opens once there is one
+                               (the pre-match menu's controller screen), before the kickoff */
+   unsigned checkpoint;     /* the card a savestate is wanted for (the broadcaster's start - the
+                               host's PC sends it: kailleraSyncCheckpointWanted()); 0 = none */
 } ksync_live;
+/* A player left the Kaillera game (the DLL's drop callback): no card opens
+   any more - "desde que os 2 jogadores ainda estejam na sala". */
+static volatile bool ksync_live_dropped;
 
 static void ksync_live_reset(void)
 {
    memset(&ksync_live, 0, sizeof(ksync_live));
+   ksync_live_dropped = false;
 }
 
 /* A goal right after a penalty kick is a penalty goal: WE2002's set piece is
@@ -2322,6 +2389,14 @@ static void ksync_live_reset(void)
 /* map->pause_waits (WE3): the match left this long after the pause menu
    closed on EXIT MATCH was left from it (the game fades out first). */
 #define KSYNC_LIVE_QUIT_FRAMES 900
+/* A match left less than 2 minutes (real time) after the kickoff whistle with
+   the score still 0x0 isn't an interrupted match (Walter, 2026-11-22: wrong
+   kits...): its card goes back to "Aguardando o reinício da partida" - no
+   "quit", no triple XP - and the next kickoff continues it. */
+#define KSYNC_LIVE_RESTART_FRAMES (2 * 60 * 60)
+/* A card waiting this long (15 min) for a kickoff is dropped - sent with
+   "cancel" (WE Camp discards it); the next settings screen opens another. */
+#define KSYNC_LIVE_WAIT_FRAMES (15 * 60 * 60)
 
 /* Every frame of a match (map->touch only): who touched the ball last and
    whether a penalty kick is being taken, so a goal that just showed up in
@@ -2409,12 +2484,32 @@ static void ksync_live_pause_watch(const uint8_t *ram, unsigned frame)
 static void ksync_live_left(unsigned frame)
 {
    char json[KSYNC_LIVE_JSON_LEN];
-   bool quit = ksync_live.active && ksync_live.pause_pad && ksync_live.last_json[0] == '{'
+   /* Left less than KSYNC_LIVE_RESTART_FRAMES after the whistle (or before
+      it), 0x0: the card waits for the next kickoff ("Aguardando o reinício" -
+      ksync_live_wait_watch() sends it) - or, nothing of it at WE Camp yet
+      (the first seconds, KSYNC_LIVE_GRACE_FRAMES), it never existed. */
+   bool early = ksync_live.active && ksync_live.card
+         && (!ksync_live.whistle || frame - ksync_live.whistle < KSYNC_LIVE_RESTART_FRAMES)
+         && ksync_live.prev_score[0] == 0 && ksync_live.prev_score[1] == 0;
+   bool quit = !early && ksync_live.active && ksync_live.pause_pad && ksync_live.last_json[0] == '{'
          && (ksync_live.quit || (ksync_live.exit_frame
             && frame - ksync_live.exit_frame <= KSYNC_LIVE_QUIT_FRAMES));
    int n     = quit ? snprintf(json, sizeof(json), "{\"quit\":%u,%s", ksync_live.pause_pad,
          ksync_live.last_json + 1) : 0;
 
+   if (early && ksync_live.card_sent)
+   {
+      ksync_live.card_wait    = 2;
+      ksync_live.wait_since   = frame;
+      ksync_live.wait_sig     = 0; /* goes at the next sample */
+      ksync_live.wait_team[0] = ksync_live.team[0];
+      ksync_live.wait_team[1] = ksync_live.team[1];
+   }
+   else if (ksync_live.active)
+   {
+      ksync_live.card      = 0; /* interrupted (or, early, never sent): the next match is another card */
+      ksync_live.card_wait = 0;
+   }
    ksync_live.active     = false;
    ksync_live.pause_pad  = 0;
    ksync_live.pause_open = false;
@@ -2794,6 +2889,13 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    if (map->state && n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "\"over\":%d,",
             ksync_live_b(ram, st, map->state) == WE_STATE_OVER ? 1 : 0);
+   /* The card (WE Camp's key for it, from its waiting states on) and the
+      kickoff whistle's frame - the 2 minutes of KSYNC_LIVE_RESTART_FRAMES
+      count from it (WE Camp applies them too when a player leaves). */
+   if (ksync_live.card && n > 0 && (size_t)n < cap)
+      n += snprintf(out + n, cap - n, "\"setup\":%u,", ksync_live.card);
+   if (ksync_live.whistle && n > 0 && (size_t)n < cap)
+      n += snprintf(out + n, cap - n, "\"whistle\":%u,", ksync_live.whistle);
    if (n > 0 && (size_t)n < cap)
       n += snprintf(out + n, cap - n, "\"teams\":[");
 
@@ -2868,28 +2970,46 @@ static bool ksync_live_json(const uint8_t *ram, const uint8_t *st, const ksync_w
    same on every PC): kickoff, goals, period changes and the end go to the
    DLL (kailleraLiveMatch(), which sends them to WE Camp), plus a state
    every 15 s for the card's clock. */
+/* A pad on each side (the players picked the sides and teams) - the game's
+   DEMO (CPU x CPU, left alone at the title screen) has none. Engines without
+   the table: always. */
+static bool ksync_live_sides(const uint8_t *ram, const ksync_we_map *map)
+{
+   bool local = false, visita = false;
+   unsigned i;
+
+   if (!map->pads)
+      return true;
+   for (i = 0; i < 4; i++)
+   {
+      local  |= ram[map->pads + i] == 0;
+      visita |= ram[map->pads + i] == 1;
+   }
+   return local && visita;
+}
+
+/* A card opens: waiting for its kickoff, the host's savestate wanted for it
+   (the broadcaster starts from there - kailleraSyncCheckpointWanted()). */
+static void ksync_live_card_open(unsigned frame, unsigned wait)
+{
+   ksync_live.card       = frame;
+   ksync_live.card_wait  = wait;
+   ksync_live.card_sent  = false;
+   ksync_live.wait_since = frame;
+   ksync_live.wait_sig   = 0;
+   ksync_live.checkpoint = frame;
+}
+
 static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
       unsigned kickoff, unsigned half)
 {
-   /* Only a match the players set up: a pad on each side (they picked the
-      sides and teams). The game's DEMO (CPU x CPU, left alone at the title
-      screen) has none - it isn't sent. Engines without the table: always. */
-   if (map->pads)
+   ksync_live.repeat_wait = false; /* (a match against the CPU too) */
+   /* Only a match the players set up: the DEMO isn't sent. */
+   if (!ksync_live_sides(ram, map))
    {
-      const uint8_t *pads = ram + map->pads;
-      bool local = false, visita = false;
-      unsigned i;
-      for (i = 0; i < 4; i++)
-      {
-         local  |= pads[i] == 0;
-         visita |= pads[i] == 1;
-      }
-      if (!local || !visita)
-      {
-         ksync_live.active = false;
-         ksync_live.armed  = 0;
-         return;
-      }
+      ksync_live.active = false;
+      ksync_live.armed  = 0;
+      return;
    }
    /* WE3 has no such table, but marks its DEMO. */
    if (map->demo && ram[map->demo] == map->demo_value)
@@ -2926,10 +3046,146 @@ static void ksync_live_start(const uint8_t *ram, const uint8_t *st, const ksync_
    ksync_live.pause_open      = false;
    ksync_live.quit            = false;
    ksync_live.exit_frame      = 0;
+   /* The card: the one waiting for this kickoff (settings screen, Repeat, a
+      restart) or a new one from here - not for a match joined midway. */
+   if (kickoff && !ksync_live.card)
+      ksync_live_card_open(kickoff, 0);
+   ksync_live.card_wait       = 0;
    /* A kickoff: the cards and injuries the game still has then (a restarted
       match) are from before it - only a match joined midway lists them. */
    if (kickoff && (map->cards[0] || map->injuries))
       ksync_live_events(ram, st, map, 0, 0, true);
+}
+
+/* A waiting card's state: the teams picked, no score yet - "waiting" 1
+   before its first kickoff, 2 after a restart. extra: more fields first
+   ("\"cancel\":1,"). */
+static bool ksync_live_wait_json(const uint8_t *ram, const ksync_we_map *map, unsigned frame,
+      const char *extra, char *out, size_t cap)
+{
+   static const uint8_t no_pads[4] = { 0, 1, 0xFF, 0xFF }; /* 1P LOCAL, 2P VISITA */
+   const uint8_t *pads = map->pads ? ram + map->pads : no_pads;
+   unsigned side;
+   int n = snprintf(out, cap, "{\"v\":2,\"engine\":\"%s\",\"content\":\"%s\",%s\"setup\":%u,\"waiting\":%u,"
+         "\"kickoff\":0,\"frame\":%u,\"period\":0,\"clock\":0,\"half\":%u,\"final\":0,"
+         "\"pads\":[%u,%u,%u,%u],\"teams\":[",
+         map->serial, ksync_local.content, extra, ksync_live.card, ksync_live.card_wait, frame,
+         ksync_live.half ? ksync_live.half : 18000, pads[0], pads[1], pads[2], pads[3]);
+
+   for (side = 0; side < 2 && n > 0 && (size_t)n < cap; side++)
+   {
+      unsigned team    = ksync_live.wait_team[side];
+      bool known       = ksync_live.have_names && team < WE_TEAMS;
+      const char *name = known ? ksync_live.names[team] : "";
+      if (!*name && map->fixed_names && team < map->fixed_count)
+         name = map->fixed_names[team];
+      n += snprintf(out + n, cap - n, "%s{\"id\":%u,\"name\":\"%s\",\"code\":\"%s\",\"goals\":0,\"scorers\":[]}",
+            side ? "," : "", team, name, known ? ksync_live.codes[team] : "");
+   }
+   if (n > 0 && (size_t)n < cap)
+      n += snprintf(out + n, cap - n, "]}");
+   return n > 0 && (size_t)n < cap;
+}
+
+/* The match settings screen is up (map->setup_screen). */
+static bool ksync_live_setup_screen(const uint8_t *ram, const ksync_we_map *map, unsigned menu)
+{
+   if (!map->setup_screen || (map->menu && menu != map->menu_front))
+      return false;
+   return map->setup_value > 0xFF ? ksync_live_u32(ram, map->setup_screen) == map->setup_value
+                                  : ram[map->setup_screen] == map->setup_value;
+}
+
+/* map->repeat_on_arm (WE3): the clock set for a kickoff with no card open -
+   the RESULT menu's "continue" (it restarts the match at once) - opens the
+   rematch's card, as the Repeat does elsewhere. */
+static void ksync_live_arm_card(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      unsigned frame)
+{
+   if (!map->repeat_on_arm || ksync_live.card || ksync_live_dropped || !ksync_live_sides(ram, map)
+         || st[map->team_id] >= WE_TEAMS || st[map->team_id + 1] >= WE_TEAMS)
+      return;
+   ksync_live_card_open(frame, 1);
+   ksync_live.wait_team[0] = st[map->team_id];
+   ksync_live.wait_team[1] = st[map->team_id + 1];
+}
+
+/* Every sample out of a match: the card before its kickoff. It opens on the
+   settings screen or the Repeat (map->menu) with the teams picked and a pad
+   on each side (after a Repeat, as soon as there is one: a match against
+   the CPU before it) - a match left early waits too (ksync_live_left()) - and goes
+   to WE Camp as "waiting" on a change of teams/pads and every 15 s, wherever
+   the players go meanwhile (back to the team select to change kits or teams:
+   the same card), until the kickoff (ksync_live_start()), a player leaving
+   the Kaillera game or KSYNC_LIVE_WAIT_FRAMES. */
+static void ksync_live_wait_watch(const uint8_t *ram, const uint8_t *st, const ksync_we_map *map,
+      unsigned frame)
+{
+   char json[KSYNC_LIVE_JSON_LEN];
+   unsigned menu = map->menu ? ram[map->menu] : 0;
+   bool picked   = st[map->team_id] < WE_TEAMS && st[map->team_id + 1] < WE_TEAMS && ksync_live_sides(ram, map);
+   bool setup    = ksync_live_setup_screen(ram, map, menu);
+   bool repeat   = map->menu && ksync_live.prev_menu == map->menu_repeat && menu == map->menu_prematch;
+   uint32_t sig;
+
+   if (map->menu)
+   {
+      if (repeat)
+         ksync_live.repeat_wait = true;
+      else if (menu != map->menu_prematch)
+         ksync_live.repeat_wait = false;
+      ksync_live.prev_menu = menu;
+   }
+   if (ksync_live_dropped)
+   {
+      ksync_live.card_wait = 0; /* (the PC of who left says so: the DLL's "left") */
+      if (!ksync_live.active)
+         ksync_live.card = 0;
+      return;
+   }
+   /* The settings screen or a Repeat with a match still going: it ended
+      without its end being seen - left. */
+   if ((setup || repeat) && ksync_live.active)
+      ksync_live_left(frame);
+   if (ksync_live.active)
+      return;
+   if ((setup || repeat || ksync_live.repeat_wait) && picked && !ksync_live.card)
+   {
+      ksync_live.repeat_wait = false;
+      ksync_live_card_open(frame, 1);
+      ksync_live.wait_team[0] = st[map->team_id];
+      ksync_live.wait_team[1] = st[map->team_id + 1];
+   }
+   if (!ksync_live.card_wait)
+      return;
+   /* The teams while waiting: from the settings screen and the pre-match
+      menu on (the team select's cursor goes through all of them). */
+   if (picked && (setup || (map->menu && menu == map->menu_prematch)))
+   {
+      ksync_live.wait_team[0] = st[map->team_id];
+      ksync_live.wait_team[1] = st[map->team_id + 1];
+   }
+   if (frame - ksync_live.wait_since >= KSYNC_LIVE_WAIT_FRAMES)
+   {
+      if (ksync_live.card_sent && ksync_live_wait_json(ram, map, frame, "\"cancel\":1,", json, sizeof(json)))
+         kailleraLiveMatchExternal(json);
+      ksync_live.card      = 0;
+      ksync_live.card_wait = 0;
+      return;
+   }
+   sig = ksync_live.wait_team[0] | ksync_live.wait_team[1] << 8 | ksync_live.card_wait << 16;
+   if (map->pads)
+      sig ^= ksync_live_u32(ram, map->pads) * 16777619u;
+   if (ksync_live.card_sent && sig == ksync_live.wait_sig
+         && frame - ksync_live.wait_sent < KSYNC_LIVE_HEARTBEAT_FRAMES)
+      return;
+   if (ksync_live_wait_json(ram, map, frame, "", json, sizeof(json)))
+   {
+      ksync_live.wait_sig  = sig;
+      ksync_live.wait_sent = frame;
+      ksync_live.card_sent = true;
+      kailleraLiveMatchExternal(json);
+   }
 }
 
 static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *scratch,
@@ -2944,6 +3200,9 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
 
    if (map && !ksync_live.active)
       ksync_live_capture_names(ram, st, map);
+   /* The card before its kickoff - the RAM isn't a match's then. */
+   if (map)
+      ksync_live_wait_watch(ram, st, map, frame);
    if (!map || !ksync_live_valid(ram, st, map, &period, &clock))
    {
       ksync_live_left(frame);
@@ -2982,6 +3241,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
          {
             ksync_live.active = false;
             ksync_live.armed  = clock;
+            ksync_live_arm_card(ram, st, map, frame);
          }
          else
             ksync_live_start(ram, st, map, frame, clock);
@@ -2994,6 +3254,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       {
          ksync_live.active = false;
          ksync_live.armed  = clock;
+         ksync_live_arm_card(ram, st, map, frame);
       }
       else if (ksync_live.armed && period == 0 && clock < ksync_live.prev_clock)
          ksync_live_start(ram, st, map, frame, ksync_live.armed);
@@ -3025,7 +3286,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
             if (clock == 0)
                final = true;
             else
-               ksync_live.active = false;
+               ksync_live_left(frame);
          }
       }
       /* WE2002, WE3: after the 2nd half the period goes back to 0, clock at
@@ -3053,7 +3314,7 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       else if (ksync_live.drop_frame && frame - ksync_live.drop_frame >= KSYNC_LIVE_LEFT_FRAMES)
       {
          ksync_live.drop_frame = 0;
-         ksync_live.active     = false; /* left the match */
+         ksync_live_left(frame); /* left the match */
       }
       /* WE3's extra time: periods 2 and 3, a third of the half - the card's
          "half" (its clock starting to run) follows it (and the cards'
@@ -3219,7 +3480,9 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
    if (final_before)
    {
       char *f = strstr(ksync_live.last_json, "\"final\":0");
-      ksync_live.active = false;
+      ksync_live.active    = false;
+      ksync_live.card      = 0; /* the next match is another card */
+      ksync_live.card_wait = 0;
       if (f)
       {
          f[8] = '1';
@@ -3247,7 +3510,33 @@ static void ksync_live_sample(const uint8_t *ram, size_t size, const uint8_t *sc
       clock             = 0;
    }
    if (ksync_live_json(ram, st, map, frame, period, clock, final, json, sizeof(json)))
+   {
       kailleraLiveMatchExternal(json);
+      ksync_live.card_sent = true;
+   }
+   if (final)
+   {
+      ksync_live.card      = 0; /* the next match is another card */
+      ksync_live.card_wait = 0;
+   }
+}
+
+/* The card a savestate is wanted for - the broadcaster starts the match's
+   YouTube live from it instead of fast-forwarding the whole session (0 =
+   none; asked once). kaillera.c takes it at the top of the next frame, where
+   "Ir direto para o Ao Vivo!" takes its states, and hands it to the DLL,
+   which uploads it only from the PC sending the Stream ao vivo. */
+unsigned kailleraSyncCheckpointWanted(void)
+{
+   unsigned card         = ksync_live.checkpoint;
+   ksync_live.checkpoint = 0;
+   return card;
+}
+
+/* A player left the Kaillera game (the DLL's drop callback). */
+void kailleraSyncPlayerDropped(void)
+{
+   ksync_live_dropped = true;
 }
 
 /* ------------------------------------------------------------------------ */

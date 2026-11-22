@@ -58,6 +58,13 @@ void kailleraSyncGameBegin(int num_players, bool playback, bool no_memcard,
    played with no memory card. No-op for every other room/core. */
 void kailleraSyncPrepareMemcards(const char *content_path, const char *core_path);
 
+/* The WE Camp broadcaster (feature/wecamp-broadcaster): called by
+   kailleraSyncPrepareMemcards() once a Watch Live's cards (the versions its
+   marker names) are in `dir` as pcsx-card1.mcd / pcsx-card2.mcd, right before
+   the core loads them - it may write over them the cards the savestate it
+   starts from was taken with. NULL = nothing (players, replays). */
+extern void (*kailleraSyncMemcardsReadyHook)(const char *dir, unsigned empty_slots);
+
 /* The Kaillera room's ISO check, before Start (kaillera.c's
    kailleraContentIdForGame(), asked by the DLL from its window's thread):
    "CRC32:SIZE" of a game's content - the same value the fingerprint sends at
@@ -82,6 +89,16 @@ void kailleraSyncFrameTick(void);
    frame's number (current_core_frame) - feeds the periodic RAM digest that
    detects an actual mid-match desync (4. below). */
 void kailleraSyncAfterFrame(unsigned frame);
+
+/* Placar ao vivo: the WE Camp card a savestate was asked for (its start
+   frame - the match's settings screen, a Repeat or its kickoff), once; 0 =
+   none. kaillera.c takes the savestate at the top of the next frame and the
+   DLL uploads it from the PC sending the Stream ao vivo - the broadcaster
+   starts the match's YouTube live from it. */
+unsigned kailleraSyncCheckpointWanted(void);
+
+/* A player left the Kaillera game (drop callback, any thread): no new card. */
+void kailleraSyncPlayerDropped(void);
 
 /* Retry-connect go-live (end of the countdown, host and peers alike): every
    side resumes from the same loaded state, so the RAM desync detector -
