@@ -108,12 +108,13 @@ void kailleraSyncRetryConnectGoLive(void);
 
 /* 5./6. Restore points + rollback. Every ~10s each machine serializes the
    core at the same frame and keeps the last few, trading a hash of each.
-   When the detector finds a desync, BACKSPACE (host = player 1 only, RetroArch window
-   focused) rolls everyone back - through COMMAND_DESYNC_RESTORE in the
-   input stream, so all machines load their own copy of the same verified
-   point after the same frame - and freezes the game for a countdown in
-   which BACKSPACE goes further back; player 1 then sends COMMAND_DESYNC_RESUME
-   and everyone continues from the same frame. */
+   When the detector finds a desync, the host (player 1) sends
+   COMMAND_DESYNC_RESTORE through the input stream by itself - up to 3 times
+   per match, then only with BACKSPACE (RetroArch window focused). After that
+   same frame every machine freezes for a 3 s countdown ("Voltando N segundos
+   em 3... 2... 1...", BACKSPACE on the host = further back); player 1 then
+   sends COMMAND_DESYNC_RESUME and, after that same frame, every machine loads
+   its own copy of the same verified point and continues from it. */
 enum
 {
    KSYNC_FRAME_RUN = 0, /* normal frame: run the core */

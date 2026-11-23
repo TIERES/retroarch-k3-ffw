@@ -68,7 +68,13 @@ HWND win32_get_window(void);
 #define KSYNC_SNAPSHOT_FRAMES 600
 #define KSYNC_SNAPSHOTS       6
 #define KSYNC_SNAPSHOT_OFFER  5
-#define KSYNC_COUNTDOWN_USEC  (5 * 1000000)
+/* 6. On a desync the game freezes where it is, counts down KSYNC_COUNTDOWN_SECS
+   ("Voltando N segundos em 3... 2... 1...") and only then loads the restore
+   point - the host starts that by itself, no key, at most KSYNC_AUTO_ROLLBACKS
+   times per match; after that it's the BACKSPACE prompt again. */
+#define KSYNC_COUNTDOWN_SECS  3
+#define KSYNC_COUNTDOWN_USEC  (KSYNC_COUNTDOWN_SECS * 1000000)
+#define KSYNC_AUTO_ROLLBACKS  3
 #define KSYNC_PROMPT_EVERY    (20 * 60)  /* frames between prompt repeats */
 #define KSYNC_PROMPT_REPEATS  3
 /* After this long the rollback offer lapses - a key hit by accident minutes
@@ -250,8 +256,10 @@ static ksync_snapshot_t    ksync_snapshots[KSYNC_SNAPSHOTS]; /* by id % SNAPSHOT
 static unsigned            ksync_snapshot_last_id;   /* newest taken this epoch */
 static bool                ksync_capture_stopped;    /* desync seen: keep the ring */
 static int                 ksync_r_state;
-static unsigned            ksync_r_id;               /* point loaded while frozen */
+static bool                ksync_r_auto;             /* PROMPT is an automatic rollback: no key */
+static unsigned            ksync_r_id;               /* point loaded at the end of the countdown */
 static bool                ksync_r_render;           /* show it: run one neutral frame */
+static unsigned            ksync_resumes;            /* rollbacks completed this match */
 static retro_time_t        ksync_r_deadline;         /* countdown end */
 static int                 ksync_r_last_second;
 static bool                ksync_r_resume_sent;
@@ -1118,6 +1126,8 @@ static void ksync_rollback_reset(void)
    ksync_snapshot_last_id    = 0;
    ksync_capture_stopped     = false;
    ksync_r_state             = KSYNC_R_NONE;
+   ksync_r_auto              = false;
+   ksync_resumes             = 0;
    ksync_r_render            = false;
    ksync_r_request_pending   = false;
    ksync_r_resume_sent       = false;
@@ -1782,7 +1792,7 @@ void kailleraSyncFrameTick(void)
          point to go back to (or say nothing new, mid-rollback). */
       if (i == desync_idx && ksync_on_desync())
       {
-         if (ksync_r_state == KSYNC_R_PROMPT && !ksync_prompt_shown)
+         if (ksync_r_state == KSYNC_R_PROMPT && !ksync_r_auto && !ksync_prompt_shown)
             ksync_show_prompt();
          continue;
       }
@@ -3922,25 +3932,40 @@ static bool ksync_is_host(void)
 static void ksync_show_prompt(void)
 {
    if (ksync_is_host())
-      ksync_osd("Possível desync encontrado, caso queiram retornar a momentos "
-            "antes aperte " KSYNC_ROLLBACK_KEY "!", true, 15 * 60);
+      ksync_osd("Desync de novo - as voltas automáticas desta partida já foram "
+            "usadas. Para voltar a momentos antes aperte " KSYNC_ROLLBACK_KEY "!",
+            true, 15 * 60);
    else
-      ksync_osd("Possível desync encontrado - o host pode voltar a partida "
-            "para momentos antes.", true, 15 * 60);
+      ksync_osd("Desync de novo - as voltas automáticas desta partida já foram "
+            "usadas. O host pode voltar a partida para momentos antes.", true,
+            15 * 60);
    ksync_prompt_shown++;
    ksync_prompt_frames = 0;
 }
 
+/* Ask everyone - through the input stream - to freeze and go back to point
+   `id` (the host only: automatically or with the rollback key). Takes effect
+   (here too) once the command comes back around. */
+static void ksync_request_restore(unsigned id)
+{
+   kailleraCommands        = COMMAND_DESYNC_RESTORE | ((id & 0xFFF) << 4);
+   ksync_r_request_pending = true;
+   ksync_r_command_frames  = 0;
+}
+
 /* The detector just reported a desync with some peer (main thread, lock not
-   held). Returns true when a rollback prompt takes the place of the plain
+   held). Returns true when the rollback takes the place of the plain
    detector message - or nothing should be shown, mid-rollback. */
 static bool ksync_on_desync(void)
 {
+   ksync_snapshot_t *s;
+
    if (ksync_r_state != KSYNC_R_NONE)
       return true;
 
    ksync_capture_stopped = true;
-   if (!ksync_pick_snapshot((unsigned)-1))
+   s = ksync_pick_snapshot((unsigned)-1);
+   if (!s)
    {
       ksync_log("Nenhum ponto de volta confirmado em todos os PCs - sem "
             "opção de voltar.");
@@ -3949,24 +3974,33 @@ static bool ksync_on_desync(void)
 
    ksync_r_state      = KSYNC_R_PROMPT;
    ksync_prompt_total = 0;
-   ksync_log("Pontos de volta disponíveis - aguardando " KSYNC_ROLLBACK_KEY ".");
+
+   if (ksync_resumes < KSYNC_AUTO_ROLLBACKS)
+   {
+      /* Automatic: the host sends the RESTORE right away; everyone freezes
+         when it comes back through the stream (a few frames from now). */
+      ksync_r_auto = true;
+      if (ksync_is_host() && !ksync_r_request_pending)
+         ksync_request_restore(s->id);
+      ksync_osd("Desync detectado! Voltando a partida...", true, 3 * 60);
+      ksync_log("Desync: volta automática %u de %d para o ponto %u.",
+            ksync_resumes + 1, KSYNC_AUTO_ROLLBACKS, s->id);
+      return true;
+   }
+
+   ksync_r_auto = false;
+   ksync_log("As %d voltas automáticas já foram usadas - aguardando "
+         KSYNC_ROLLBACK_KEY ".", KSYNC_AUTO_ROLLBACKS);
    return true;
 }
 
-/* The host's rollback key: ask everyone - through the input stream - to load point
-   `id`. Takes effect (here too) once the command comes back around. */
-static void ksync_request_restore(unsigned id)
-{
-   kailleraCommands        = COMMAND_DESYNC_RESTORE | ((id & 0xFFF) << 4);
-   ksync_r_request_pending = true;
-   ksync_r_command_frames  = 0;
-}
-
-/* COMMAND_DESYNC_RESTORE, after the same frame on every machine. */
+/* COMMAND_DESYNC_RESTORE, after the same frame on every machine: freeze the
+   game where it is and count down - the point itself is loaded at the end,
+   by ksync_resume(). A second RESTORE while frozen (the host's key) only
+   picks an older point and restarts the count. */
 static void ksync_restore_to(unsigned id)
 {
    ksync_snapshot_t *s = &ksync_snapshots[id % KSYNC_SNAPSHOTS];
-   retro_ctx_serialize_info_t info;
    char msg[160];
 
    ksync_r_request_pending = false;
@@ -3979,11 +4013,7 @@ static void ksync_restore_to(unsigned id)
       return;
    }
 
-   info.data_const = s->data;
-   info.data       = NULL;
-   info.size       = s->size;
-   if (     !s->valid || s->id != id || s->epoch != ksync_epoch || !s->data
-         || !core_unserialize(&info))
+   if (!s->valid || s->id != id || s->epoch != ksync_epoch || !s->data)
    {
       snprintf(msg, sizeof(msg), "Falha ao voltar: este PC não tem o ponto "
             "%u - reiniciem a partida.", id);
@@ -3999,25 +4029,45 @@ static void ksync_restore_to(unsigned id)
       ksync_r_back += (ksync_r_id - id) * (KSYNC_SNAPSHOT_FRAMES / 60);
 
    ksync_r_state         = KSYNC_R_FROZEN;
+   ksync_r_auto          = false;
    ksync_r_id            = id;
-   ksync_r_render        = true;
+   ksync_r_render        = false;
    ksync_r_deadline      = cpu_features_get_time_usec() + KSYNC_COUNTDOWN_USEC;
    ksync_r_last_second   = -1;
    ksync_r_resume_sent   = false;
    ksync_capture_stopped = true;
    ksync_rollbacks++;
-   ksync_log("Voltando para o ponto %u (~%u s antes do desync).", id,
-         ksync_r_back);
+   ksync_log("Jogo congelado: voltando %u s, para o ponto %u, em %d s.",
+         ksync_r_back, id, KSYNC_COUNTDOWN_SECS);
 }
 
-/* COMMAND_DESYNC_RESUME, after the same frame on every machine. */
+/* COMMAND_DESYNC_RESUME, after the same frame on every machine: load the
+   point picked by the RESTORE(s) and carry on from it. */
 static void ksync_resume(void)
 {
    ksync_snapshot_t base;
+   ksync_snapshot_t *s;
+   retro_ctx_serialize_info_t info;
    int keep, i;
 
    if (ksync_r_state != KSYNC_R_FROZEN)
       return; /* a duplicate - already resumed */
+
+   s               = &ksync_snapshots[ksync_r_id % KSYNC_SNAPSHOTS];
+   info.data_const = s->data;
+   info.data       = NULL;
+   info.size       = s->size;
+   if (     !s->valid || s->id != ksync_r_id || s->epoch != ksync_epoch
+         || !s->data || !core_unserialize(&info))
+   {
+      char msg[160];
+      snprintf(msg, sizeof(msg), "Falha ao voltar: este PC não conseguiu "
+            "carregar o ponto %u - reiniciem a partida.", ksync_r_id);
+      ksync_osd(msg, true, 10 * 60);
+      ksync_log("%s", msg);
+      ksync_r_state = KSYNC_R_NONE; /* the ring stays stopped: no new offer */
+      return;
+   }
 
    /* The point we resume from becomes point 0 of the new epoch, so a quick
       second desync can come straight back here. */
@@ -4046,6 +4096,7 @@ static void ksync_resume(void)
    ksync_r_state          = KSYNC_R_NONE;
    ksync_prompt_shown     = 0;
    ksync_renumber_pending = true; /* digests restart from the next frame */
+   ksync_resumes++;
 
    ksync_osd("Partida retomada!", false, 3 * 60);
    ksync_log("Partida retomada a partir do ponto de volta (%u s antes do "
@@ -4098,6 +4149,29 @@ static void ksync_rollback_tick(void)
    if (     ksync_r_request_pending
          && ++ksync_r_command_frames >= KSYNC_COMMAND_RETRY)
       ksync_r_request_pending = false;
+
+   if (ksync_r_state == KSYNC_R_PROMPT && ksync_r_auto)
+   {
+      /* Waiting for the automatic RESTORE to come back around. The host
+         sends it again if it got lost (no key involved either way). */
+      if (++ksync_prompt_total >= KSYNC_PROMPT_EXPIRE)
+      {
+         ksync_r_state = KSYNC_R_NONE; /* the ring stays stopped: no new offer */
+         ksync_r_auto  = false;
+         ksync_osd("A volta automática não aconteceu - confirmem e reiniciem a "
+               "partida.", true, 5 * 60);
+         ksync_log("A volta automática não chegou em %d s - desistindo.",
+               KSYNC_PROMPT_EXPIRE / 60);
+         return;
+      }
+      if (ksync_is_host() && !ksync_r_request_pending)
+      {
+         ksync_snapshot_t *s = ksync_pick_snapshot((unsigned)-1);
+         if (s)
+            ksync_request_restore(s->id);
+      }
+      return;
+   }
 
    if (ksync_r_state == KSYNC_R_PROMPT)
    {
@@ -4155,16 +4229,20 @@ static void ksync_rollback_tick(void)
          int secs = (int)((ksync_r_deadline - now + 999999) / 1000000);
          if (secs != ksync_r_last_second)
          {
-            char msg[160];
+            /* "Desync detectado! Voltando 15 segundos em 3... 2... 1..." -
+               one more number every second. */
+            char msg[192];
+            int  n, k;
             ksync_r_last_second = secs;
-            if (ksync_is_host())
-               snprintf(msg, sizeof(msg), "Voltou %u s. Retomando em %d... "
-                     "(" KSYNC_ROLLBACK_KEY " = voltar mais %u s)", ksync_r_back,
-                     secs, KSYNC_SNAPSHOT_FRAMES / 60);
-            else
-               snprintf(msg, sizeof(msg), "Voltou %u s. Retomando em %d... "
-                     "(o host pode voltar mais)", ksync_r_back, secs);
-            ksync_osd(msg, false, 70);
+            n = snprintf(msg, sizeof(msg), "Desync detectado! Voltando %u "
+                  "segundos em", ksync_r_back);
+            for (k = KSYNC_COUNTDOWN_SECS; k >= secs && k > 0
+                  && n > 0 && n < (int)sizeof(msg); k--)
+               n += snprintf(msg + n, sizeof(msg) - n, " %d...", k);
+            if (ksync_is_host() && n > 0 && n < (int)sizeof(msg))
+               snprintf(msg + n, sizeof(msg) - n, " (" KSYNC_ROLLBACK_KEY
+                     " = voltar mais %u s)", KSYNC_SNAPSHOT_FRAMES / 60);
+            ksync_osd(msg, true, 70);
          }
       }
    }
