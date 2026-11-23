@@ -111,8 +111,8 @@ void kailleraSyncRetryConnectGoLive(void);
    When the detector finds a desync, the host (player 1) sends
    COMMAND_DESYNC_RESTORE through the input stream by itself - up to 3 times
    per match, then only with BACKSPACE (RetroArch window focused). After that
-   same frame every machine freezes for a 3 s countdown ("Voltando N segundos
-   em 3... 2... 1...", BACKSPACE on the host = further back); player 1 then
+   same frame every machine freezes for a 3 s countdown ("Voltando em 3...",
+   BACKSPACE on the host = further back); player 1 then
    sends COMMAND_DESYNC_RESUME and, after that same frame, every machine loads
    its own copy of the same verified point and continues from it. */
 enum

@@ -69,7 +69,7 @@ HWND win32_get_window(void);
 #define KSYNC_SNAPSHOTS       6
 #define KSYNC_SNAPSHOT_OFFER  5
 /* 6. On a desync the game freezes where it is, counts down KSYNC_COUNTDOWN_SECS
-   ("Voltando N segundos em 3... 2... 1...") and only then loads the restore
+   ("Voltando a partida em N segundos atrás...", "Voltando em 3...") and only then loads the restore
    point - the host starts that by itself, no key, at most KSYNC_AUTO_ROLLBACKS
    times per match; after that it's the BACKSPACE prompt again. */
 #define KSYNC_COUNTDOWN_SECS  3
@@ -3982,7 +3982,8 @@ static bool ksync_on_desync(void)
       ksync_r_auto = true;
       if (ksync_is_host() && !ksync_r_request_pending)
          ksync_request_restore(s->id);
-      ksync_osd("Desync detectado! Voltando a partida...", true, 3 * 60);
+      /* No message yet: the freeze (a few frames from now) says it all,
+         see ksync_restore_to(). */
       ksync_log("Desync: volta automática %u de %d para o ponto %u.",
             ksync_resumes + 1, KSYNC_AUTO_ROLLBACKS, s->id);
       return true;
@@ -4039,6 +4040,11 @@ static void ksync_restore_to(unsigned id)
    ksync_rollbacks++;
    ksync_log("Jogo congelado: voltando %u s, para o ponto %u, em %d s.",
          ksync_r_back, id, KSYNC_COUNTDOWN_SECS);
+
+   /* Stays up through the whole countdown ("Voltando em 3..." below it). */
+   snprintf(msg, sizeof(msg), "Desync detectado! Voltando a partida em %u "
+         "segundos atrás...", ksync_r_back);
+   ksync_osd(msg, true, (KSYNC_COUNTDOWN_SECS + 1) * 60);
 }
 
 /* COMMAND_DESYNC_RESUME, after the same frame on every machine: load the
@@ -4098,7 +4104,7 @@ static void ksync_resume(void)
    ksync_renumber_pending = true; /* digests restart from the next frame */
    ksync_resumes++;
 
-   ksync_osd("Partida retomada!", false, 3 * 60);
+   ksync_osd("Partida retornada a momentos antes do desync.", false, 3 * 60);
    ksync_log("Partida retomada a partir do ponto de volta (%u s antes do "
          "desync).", ksync_r_back);
 }
@@ -4229,20 +4235,12 @@ static void ksync_rollback_tick(void)
          int secs = (int)((ksync_r_deadline - now + 999999) / 1000000);
          if (secs != ksync_r_last_second)
          {
-            /* "Desync detectado! Voltando 15 segundos em 3... 2... 1..." -
-               one more number every second. */
-            char msg[192];
-            int  n, k;
+            /* "Voltando em 3...", "Voltando em 2...", "Voltando em 1..." -
+               one short message per second. */
+            char msg[64];
             ksync_r_last_second = secs;
-            n = snprintf(msg, sizeof(msg), "Desync detectado! Voltando %u "
-                  "segundos em", ksync_r_back);
-            for (k = KSYNC_COUNTDOWN_SECS; k >= secs && k > 0
-                  && n > 0 && n < (int)sizeof(msg); k--)
-               n += snprintf(msg + n, sizeof(msg) - n, " %d...", k);
-            if (ksync_is_host() && n > 0 && n < (int)sizeof(msg))
-               snprintf(msg + n, sizeof(msg) - n, " (" KSYNC_ROLLBACK_KEY
-                     " = voltar mais %u s)", KSYNC_SNAPSHOT_FRAMES / 60);
-            ksync_osd(msg, true, 70);
+            snprintf(msg, sizeof(msg), "Voltando em %d...", secs);
+            ksync_osd(msg, true, 60);
          }
       }
    }

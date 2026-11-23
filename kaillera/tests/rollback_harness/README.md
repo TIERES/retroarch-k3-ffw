@@ -39,9 +39,10 @@ Argumentos: `<frames> <frames dos desyncs> [frame a partir do qual o próximo RE
 - Após cada volta, `RAM HOST x PEER diferente nos frames X-Y` termina no frame do RESUME.
   Depois disso as RAMs dos dois PCs ficam iguais até o próximo desync.
 - Os dois PCs congelam no mesmo frame e pelo mesmo número de frames (183, ou seja, ~3 s).
-- A mensagem cresce a cada segundo:
-  `Desync detectado! Voltando 10 segundos em 3...`, depois `... em 3... 2...` e
-  `... em 3... 2... 1...`. Em seguida, `Partida retomada!`.
+- As mensagens, nos dois PCs:
+  `Desync detectado! Voltando a partida em 10 segundos atrás...`, depois uma por segundo:
+  `Voltando em 3...`, `Voltando em 2...` e `Voltando em 1...`. Em seguida,
+  `Partida retornada a momentos antes do desync.`.
 - No 4º desync da partida não há volta automática. Aparece o aviso para o host apertar
   BACKSPACE.
 - Se o RESTORE se perder, o host manda outro 3 s depois.
